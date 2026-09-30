@@ -12,7 +12,7 @@
 
 ## Unreleased
 
-- 干净检出即可完成固件构建：`tools/validate.sh --firmware` 现在先 `reconfigure` 拉取依赖，再重打 `esp_lvgl_port` 的 FAP_SCREENSHOT_V1 取帧钩子补丁（`scripts/patch-esp-lvgl-port.py`），最后才编译——`managed_components/` 不入库，重新解析依赖会覆盖打过补丁的源码。补上 `.github/workflows/build-firmware.yml` 与 `.github/workflows/static-checks.yml`，打 tag 即可构建并发布合并固件；`espressif/mdns` 钉到 1.13.1，让依赖解析可复现。
+- 干净检出即可完成固件构建：`tools/validate.sh --firmware` 现在先 `reconfigure` 拉取依赖，再重打 `esp_lvgl_port` 的 FAP_SCREENSHOT_V1 取帧钩子补丁（`scripts/patch-esp-lvgl-port.py`），最后才编译——`managed_components/` 不入库，重新解析依赖会覆盖打过补丁的源码。补上 `.github/workflows/build-firmware.yml` 与 `.github/workflows/static-checks.yml`，打 tag 即可构建并发布合并固件；`espressif/mdns` 钉到 1.13.1，让依赖解析可复现。补丁脚本改为按代码形态定位锚点，锚点缺失即让构建失败——此前上游改动后会写成「改了一半」的源码，编译照过、只在链接期报 `lvgl_port_display_set_snapshot_cb` 未定义。
 
 - 门户新增配置与记录的整份备份/恢复：`GET /backup` 下载一个 JSON 文档，内含完整 `we_cfg`
   配置(nickname、Wi-Fi 档案、平台 API Key)与 `balhist` 逐日记账(各平台每日基线，31 天)；

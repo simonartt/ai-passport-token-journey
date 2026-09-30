@@ -7,3 +7,7 @@ managed_components/
 
 # 本地交接笔记(不进公共发布)
 handoff/
+
+# Python 字节码缓存(tools/ 下跑脚本会生成)
+__pycache__/
+*.py[cod]
