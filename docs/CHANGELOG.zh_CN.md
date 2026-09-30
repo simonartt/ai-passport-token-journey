@@ -12,6 +12,17 @@
 
 ## Unreleased
 
+- 修掉配网后刷新余额只报 `DIRECT FAIL` 的问题。两个互相独立的原因：其一，门户保存是在空结构上
+  重建配置（`we_cfg_init`）而不是合并进已存配置，而表单的 API Key / WiFi 密码输入框又从不回填，
+  于是「只填了 WiFi」这一次提交会把已配的平台 Key 全部抹掉——刷新时没有可查对象，余额页只剩
+  `DIRECT FAIL`。现在保存改为在已存配置上做增量合并（新增 `we_cfg_set_wifi` /
+  `we_cfg_set_prov_key` / `we_cfg_del_prov`）：字段留空即保持原值（WiFi 密码留空会沿用该 SSID
+  的旧密码），删除平台需勾选行内新增的「清除该平台」复选框；平台行会显式标出是否已配置
+  （`已配置(尾号 cdef),留空保持不变`），保存出 0 个平台 Key 时打一条告警日志。其二，SNTP
+  等待原本排在取数循环**之后**，冷启动时 RTC 还停在 1970，TLS 证书包会把每张证书都判成
+  「尚未生效」从而握手全失败；现在改为发请求前先校时。一个平台 Key 都没有时页面直接显示
+  `NO API KEY`，不再误导成网络问题。
+
 - 干净检出即可完成固件构建：`tools/validate.sh --firmware` 现在先 `reconfigure` 拉取依赖，再重打 `esp_lvgl_port` 的 FAP_SCREENSHOT_V1 取帧钩子补丁（`scripts/patch-esp-lvgl-port.py`），最后才编译——`managed_components/` 不入库，重新解析依赖会覆盖打过补丁的源码。补上 `.github/workflows/build-firmware.yml` 与 `.github/workflows/static-checks.yml`，打 tag 即可构建并发布合并固件；`espressif/mdns` 钉到 1.13.1，让依赖解析可复现。补丁脚本改为按代码形态定位锚点，锚点缺失即让构建失败——此前上游改动后会写成「改了一半」的源码，编译照过、只在链接期报 `lvgl_port_display_set_snapshot_cb` 未定义。
 
 - 门户新增配置与记录的整份备份/恢复：`GET /backup` 下载一个 JSON 文档，内含完整 `we_cfg`

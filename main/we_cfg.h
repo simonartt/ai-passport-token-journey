@@ -52,6 +52,21 @@ bool we_cfg_add_wifi(we_cfg_t *cfg, const char *ssid, const char *pass, const ch
 bool we_cfg_add_prov(we_cfg_t *cfg, const char *provider_id, const char *api_key,
                      const char *label);
 
+// 表单增量写 WiFi:pass 为空时沿用同 SSID 旧档案的密码(改昵称/换 SSID 时
+// 不必重输密码,也不会把密码冲成空)。新 SSID + 空密码 → 按开放网络处理。
+bool we_cfg_set_wifi(we_cfg_t *cfg, const char *ssid, const char *pass, const char *host);
+
+// 表单增量写平台 Key:api_key 为空 = 不改动(返回该平台是否已存在)。
+// 只有拿到非空 Key 才覆盖,避免"只改 WiFi 就把 Key 抹掉"。
+bool we_cfg_set_prov_key(we_cfg_t *cfg, const char *provider_id, const char *api_key,
+                         const char *label);
+
+// 该平台是否已配置(供门户显示"已配置"状态)
+bool we_cfg_has_prov(const we_cfg_t *cfg, const char *provider_id);
+
+// 移除某个平台;不存在返回 false
+bool we_cfg_del_prov(we_cfg_t *cfg, const char *provider_id);
+
 // 移除此前所有配置(保留 magic/version 已设状态供复用)
 void we_cfg_clear(we_cfg_t *cfg);
 

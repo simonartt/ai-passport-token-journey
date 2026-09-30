@@ -92,6 +92,62 @@ bool we_cfg_add_prov(we_cfg_t *cfg, const char *provider_id, const char *api_key
     return true;
 }
 
+bool we_cfg_set_wifi(we_cfg_t *cfg, const char *ssid, const char *pass, const char *host)
+{
+    if (!cfg || !ssid || !ssid[0]) return false;
+
+    const char *use_pass = pass ? pass : "";
+    char keep[sizeof(cfg->wifi[0].pass)];
+    if (use_pass[0] == '\0') {
+        // 密码栏永远是空白(不预填),留空代表"沿用旧的"。
+        // 必须先拷到局部缓冲:we_cfg_add_wifi 会先 memset 目标槽位,
+        // 直接指过去等于把源数据自己擦掉。
+        for (uint8_t i = 0; i < cfg->wifi_count; i++) {
+            if (strcmp(cfg->wifi[i].ssid, ssid) != 0) continue;
+            const char *old = cfg->wifi[i].pass;
+            size_t n = strlen(old);
+            if (n >= sizeof(keep)) n = sizeof(keep) - 1;
+            memcpy(keep, old, n);
+            keep[n] = '\0';
+            use_pass = keep;
+            break;
+        }
+    }
+    return we_cfg_add_wifi(cfg, ssid, use_pass, host);
+}
+
+bool we_cfg_set_prov_key(we_cfg_t *cfg, const char *provider_id, const char *api_key,
+                         const char *label)
+{
+    if (!cfg || !provider_id || !provider_id[0]) return false;
+    if (api_key && api_key[0]) {
+        return we_cfg_add_prov(cfg, provider_id, api_key, label);
+    }
+    return we_cfg_has_prov(cfg, provider_id);   // 空 = 不修改
+}
+
+bool we_cfg_has_prov(const we_cfg_t *cfg, const char *provider_id)
+{
+    if (!cfg || !provider_id) return false;
+    for (uint8_t i = 0; i < cfg->prov_count; i++) {
+        if (strcmp(cfg->prov[i].provider_id, provider_id) == 0) return true;
+    }
+    return false;
+}
+
+bool we_cfg_del_prov(we_cfg_t *cfg, const char *provider_id)
+{
+    if (!cfg || !provider_id || !provider_id[0]) return false;
+    for (uint8_t i = 0; i < cfg->prov_count; i++) {
+        if (strcmp(cfg->prov[i].provider_id, provider_id) != 0) continue;
+        for (uint8_t j = i; j + 1 < cfg->prov_count; j++) cfg->prov[j] = cfg->prov[j + 1];
+        cfg->prov_count--;
+        memset(&cfg->prov[cfg->prov_count], 0, sizeof(cfg->prov[0]));
+        return true;
+    }
+    return false;
+}
+
 void we_cfg_clear(we_cfg_t *cfg)
 {
     if (!cfg) return;

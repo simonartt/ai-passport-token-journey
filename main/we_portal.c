@@ -233,6 +233,42 @@ static esp_err_t portal_ask_auth(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------- 页面
+// 平台 Key 一行:已配置时提示尾号 + 给"清除该平台"复选框,未配置时给 sk- 占位。
+// 输入框一律不回填 Key 明文(页面可能被投屏/截屏),所以后端保存时必须按
+// "留空=不改"合并,见 save_post 与 we_cfg_set_prov_key。
+static void send_prov_row(httpd_req_t *req, const we_cfg_t *cfg, const char *id,
+                          const char *label, const char *field, const char *del_field)
+{
+    const we_prov_t *hit = NULL;
+    for (uint8_t i = 0; i < cfg->prov_count; i++) {
+        if (strcmp(cfg->prov[i].provider_id, id) == 0) { hit = &cfg->prov[i]; break; }
+    }
+
+    httpd_resp_sendstr_chunk(req, "<div class=\"row\"><label>");
+    httpd_resp_sendstr_chunk(req, label);
+    httpd_resp_sendstr_chunk(req, " Key</label><input name=\"");
+    httpd_resp_sendstr_chunk(req, field);
+    httpd_resp_sendstr_chunk(req,
+        "\" maxlength=\"95\" autocomplete=\"off\" placeholder=\"");
+    if (hit) {
+        size_t n = strlen(hit->api_key);
+        char tail[8] = "";
+        if (n > 4) text_copy(tail, sizeof(tail), hit->api_key + n - 4);
+        httpd_resp_sendstr_chunk(req, "已配置(尾号 ");
+        send_html_escaped(req, tail);
+        httpd_resp_sendstr_chunk(req, "),留空保持不变");
+    } else {
+        httpd_resp_sendstr_chunk(req, "sk-...(未配置)");
+    }
+    httpd_resp_sendstr_chunk(req, "\">");
+    if (hit) {
+        httpd_resp_sendstr_chunk(req, "<label class=\"chk\"><input type=\"checkbox\" name=\"");
+        httpd_resp_sendstr_chunk(req, del_field);
+        httpd_resp_sendstr_chunk(req, "\" value=\"1\">清除该平台</label>");
+    }
+    httpd_resp_sendstr_chunk(req, "</div>");
+}
+
 static esp_err_t root_get(httpd_req_t *req)
 {
     if (!portal_auth_ok(req)) return portal_ask_auth(req);
@@ -257,6 +293,8 @@ static esp_err_t root_get(httpd_req_t *req)
         "color:#fff;border:0;border-radius:8px;padding:13px;font-size:16px;font-weight:700;"
         "margin-top:22px;text-align:center;text-decoration:none}"
         ".btn2{background:#24345c;color:#c7d2fe;margin-top:10px}"
+        ".chk{display:flex;gap:8px;align-items:center;color:#f87171;font-size:13px;margin-top:8px}"
+        ".chk input{width:auto;padding:0}"
         ".ok{color:#34d399;font-weight:700}</style></head><body>"
         "<header><h1>Token 余额看板</h1><div class=\"sub\">本地配置 · 数据仅设备直连各平台</div></header><main>"
         "<form method=\"post\" action=\"/save\" id=\"cfg\">"
@@ -268,10 +306,13 @@ static esp_err_t root_get(httpd_req_t *req)
     }
     httpd_resp_sendstr_chunk(req,
         "\"></div><div class=\"row\"><label>WiFi 密码</label>"
-        "<input type=\"password\" name=\"pass\" maxlength=\"64\"></div>"
-        "<h2>平台 API Key(留空=不使用该平台)</h2>"
-        "<div class=\"row\"><label>DeepSeek Key</label><input name=\"key_deepseek\" maxlength=\"95\" placeholder=\"sk-...\"></div>"
-        "<div class=\"row\"><label>Kimi(Moonshot)Key</label><input name=\"key_kimi\" maxlength=\"95\" placeholder=\"sk-...\"></div>"
+        "<input type=\"password\" name=\"pass\" maxlength=\"64\" autocomplete=\"new-password\">"
+        "<p class=\"hint\">留空 = 密码不变(只改 WiFi 名称时不必重输)</p></div>"
+        "<h2>平台 API Key</h2>"
+        "<p class=\"hint\">留空 = 保持现有配置;要删除平台请勾下面的\"清除该平台\"</p>");
+    send_prov_row(req, &cfg, "deepseek", "DeepSeek", "key_deepseek", "del_deepseek");
+    send_prov_row(req, &cfg, "kimi", "Kimi(Moonshot)", "key_kimi", "del_kimi");
+    httpd_resp_sendstr_chunk(req,
         "<h2>锁屏签名(可选,空=不显示)</h2>"
         "<div class=\"row\"><label>昵称</label><input name=\"nickname\" maxlength=\"23\" value=\"");
     send_html_escaped(req, cfg.nickname);
@@ -331,18 +372,33 @@ static esp_err_t save_post(httpd_req_t *req)
     body[received] = '\0';
 
     char v[160];
-    we_cfg_t cfg;
+    // 以已存配置为基线做增量合并。表单里的 WiFi 密码和 API Key 永远是空白
+    // (不回填,免得明文出现在页面上),如果从空配置重建,"只改 WiFi"这一步
+    // 就会把已配的 API Key 全部抹掉 —— 现象是余额刷新一个平台都查不到,
+    // 屏幕直接跳 DIRECT FAIL。
+    we_cfg_t cfg, old;
     we_cfg_init(&cfg);
+    if (we_cfg_load(&old)) cfg = old;
 
     if (form_get(body, "ssid", v, sizeof(v)) && v[0]) {
         char pass[96] = "";
         form_get(body, "pass", pass, sizeof(pass));
-        we_cfg_add_wifi(&cfg, v, pass, "");
+        we_cfg_set_wifi(&cfg, v, pass, "");
     }
-    if (form_get(body, "key_deepseek", v, sizeof(v)) && v[0])
-        we_cfg_add_prov(&cfg, "deepseek", v, "");
-    if (form_get(body, "key_kimi", v, sizeof(v)) && v[0])
-        we_cfg_add_prov(&cfg, "kimi", v, "");
+
+    // Key 栏留空 = 保持不变;要删除平台得勾"清除"复选框
+    static const struct { const char *key, *del, *id; } prov_rows[] = {
+        { "key_deepseek", "del_deepseek", "deepseek" },
+        { "key_kimi",     "del_kimi",     "kimi"     },
+    };
+    for (size_t i = 0; i < sizeof(prov_rows) / sizeof(prov_rows[0]); i++) {
+        if (form_get(body, prov_rows[i].del, v, sizeof(v))) {
+            we_cfg_del_prov(&cfg, prov_rows[i].id);
+            continue;
+        }
+        if (form_get(body, prov_rows[i].key, v, sizeof(v)))
+            we_cfg_set_prov_key(&cfg, prov_rows[i].id, v, "");
+    }
     if (form_get(body, "nickname", v, sizeof(v)))
         text_copy(cfg.nickname, sizeof(cfg.nickname), v);
 
@@ -359,6 +415,8 @@ static esp_err_t save_post(httpd_req_t *req)
     }
     ESP_LOGI(TAG, "配置已保存:wifi=%d prov=%d nickname=%s,准备重启",
              cfg.wifi_count, cfg.prov_count, cfg.nickname[0] ? cfg.nickname : "(空)");
+    if (cfg.prov_count == 0)
+        ESP_LOGW(TAG, "没有任何平台 Key,余额页会显示 NO API KEY");
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr(req,

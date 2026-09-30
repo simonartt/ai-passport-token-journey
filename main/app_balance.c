@@ -1046,6 +1046,7 @@ static int https_fetch_provider(const we_provider_t *prov, const char *key,
 }
 
 // ---------------------------------------------------------------- SNTP 时间(UTC+8)
+#define SNTP_WAIT_MS 3500   // 取数前最多等这么久校时(首次约 1~3s;等不到也继续)
 static bool s_sntp_done;
 
 static void ensure_sntp(void)
@@ -1257,6 +1258,21 @@ static void balance_worker(void *arg)
     }
     hist_load();
 
+    // 一个平台 Key 都没有 → 联网也没有可查的对象。直接点明原因,别让下面的
+    // 取数循环空跑一轮再报 DIRECT FAIL(那个提示会被误读成网络问题)。
+    if (s_cfg.prov_count == 0) {
+        ESP_LOGW(TAG, "没有平台 Key,请到 Portal 填 API Key");
+        if (!s_cancel) {
+            bsp_lvgl_lock(1000);
+            set_state("NO API KEY");
+            s_data_ok = false;
+            bsp_lvgl_unlock();
+        }
+        s_busy = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
     // 3. 联网:按档案顺序尝试
     int rc = -1;
     for (int i = 0; i < s_nprof; i++) {
@@ -1282,7 +1298,11 @@ static void balance_worker(void *arg)
     if (s_cancel) { wifi_teardown(); s_busy = false; vTaskDelete(NULL); return; }
 
     // 4. 直连官方余额(只查已配置平台),同时收实时余额做本地记账
+    // 先校时再发请求:HTTPS 走证书包校验,会比对证书有效期,冷启动时 RTC 还停在
+    // 1970,证书会被判成"尚未生效"而握手失败 —— 所有平台一起失败,屏幕只剩
+    // DIRECT FAIL。原来的等待放在取数之后,等于第一次刷新必然拿不到数。
     ensure_sntp();                       // 直连需要本地时间(更新时间/记账天界)
+    wait_sntp(SNTP_WAIT_MS);
     int n = s_cfg.prov_count;
     if (n > ROW_COUNT) n = ROW_COUNT;
     float cur[ROW_COUNT] = { 0 };
@@ -1322,8 +1342,6 @@ static void balance_worker(void *arg)
         }
         ESP_LOGI(TAG, "direct %s got=%d ok=%d", prov->id, gotd, ok);
     }
-
-    wait_sntp(3500);                     // WiFi 还开着,等校时完成(首次约1~3s)
 
     if (!s_cancel) {
         bsp_lvgl_lock(1000);
