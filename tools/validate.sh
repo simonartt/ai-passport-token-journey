@@ -52,9 +52,19 @@ run_firmware_checks() (
     validation_build_dir="$(mktemp -d /tmp/ai-passport-firmware.XXXXXX)"
     trap 'case "${validation_build_dir}" in /tmp/ai-passport-firmware.*) rm -rf -- "${validation_build_dir}" ;; esac' EXIT
 
-    SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
-        idf.py -B "${validation_build_dir}" \
-        -D "SDKCONFIG=${validation_build_dir}/sdkconfig" build
+    # managed_components/ 不入库:组件管理器每次解析依赖都会重新解压 esp_lvgl_port,
+    # 把 FAP_SCREENSHOT_V1 的取帧钩子补丁冲掉。所以顺序必须是
+    # 先 reconfigure(拉依赖)→ 打补丁 → 再 build,否则 fap_screenshot.c 会因
+    # lvgl_port_display_set_snapshot_cb() 未声明而编译失败。
+    idf_py_build() {
+        SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
+            idf.py -B "${validation_build_dir}" \
+            -D "SDKCONFIG=${validation_build_dir}/sdkconfig" "$@"
+    }
+
+    idf_py_build reconfigure
+    python3 "${repo_root}/scripts/patch-esp-lvgl-port.py"
+    idf_py_build build
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"
     python3 tools/verify_firmware.py "${validation_build_dir}"
