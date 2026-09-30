@@ -1,0 +1,9 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+.vscode/
+.idea/
+
+# 本地交接笔记(不进公共发布)
+handoff/

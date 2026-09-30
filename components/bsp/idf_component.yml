@@ -1,0 +1,8 @@
+dependencies:
+  idf: ">=5.5.3,<5.6.0"
+  lvgl/lvgl: "^9.5.0"
+  espressif/esp_lvgl_port: "2.9.0"
+  espressif/button: "4.2.0"
+  espressif/esp_codec_dev: "1.6.2"
+  # 配置后台用 http://<hostname>.local/ 访问,免去记 IP(STA 模式下 IP 会随 DHCP 变化)
+  espressif/mdns: "^1.8.0"
