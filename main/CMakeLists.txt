@@ -18,5 +18,5 @@ idf_component_register(
          "demo_portal.c"
          "fap_screenshot.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_driver_usb_serial_jtag esp_event esp_http_client esp_http_server esp_hw_support esp_netif esp_timer esp-tls esp_wifi json nvs_flash
+    REQUIRES bsp bt esp_driver_usb_serial_jtag esp_event esp_http_client esp_http_server esp_hw_support esp_netif esp_timer esp-tls esp_wifi json mdns nvs_flash
 )

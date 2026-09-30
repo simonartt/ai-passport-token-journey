@@ -124,14 +124,18 @@ char *we_backup_export(void)
     cJSON_AddNumberToObject(root, "version", (double)WE_BACKUP_VERSION);
 
     // 未校时就不写时间戳,免得留下误导性的 1970 时间
-    char when[32] = "";
+    // 缓冲给到 96:gcc 的 -Werror=format-truncation 会按 %d 的最坏宽度(11 位)算,
+    // 6 个字段 6*11+5=71,32 字节会被判成可能截断;实际输出恒为 19 字节。
+    char when[96] = "";
     time_t now = time(NULL);
     if (now >= 1700000000) {
         time_t t8 = now + 8 * 3600;              // 与设备记账天界一致,用 UTC+8
         struct tm tm;
         gmtime_r(&t8, &tm);
+        int year = tm.tm_year + 1900;
+        if (year < 1970 || year > 9999) year = 1970;   // 异常年份垫掉,别写出 6 位年份
         snprintf(when, sizeof(when), "%04d-%02d-%02d %02d:%02d:%02d",
-                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 year, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
     }
     cJSON_AddStringToObject(root, "created_utc8", when);
