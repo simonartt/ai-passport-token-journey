@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>   // size_t(we_cfg_sanitize_key 的参数用)
 #include <stdint.h>
 
 #ifdef __cplusplus
