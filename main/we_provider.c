@@ -66,8 +66,8 @@ static bool parse_kimi(const char *body, char *amount, size_t cap)
 
 // ---------------------------------------------------------------- 适配器表
 static const we_provider_t PROVIDERS[] = {
-    { "deepseek", "DeepSeek", "https://api.deepseek.com/user/balance" },
-    { "kimi", "Kimi", "https://api.moonshot.cn/v1/users/me/balance" },
+    { "deepseek", "DeepSeek", "https://api.deepseek.com/user/balance",     "api.deepseek.com" },
+    { "kimi",     "Kimi",     "https://api.moonshot.cn/v1/users/me/balance", "api.moonshot.cn" },
 };
 
 bool we_provider_lookup(const char *id, const we_provider_t **out)

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "we_diag.h"      // 只用 WE_DIAG_HOST_MAX 这个常量(host 要能塞进探测缓冲)
 #include "we_provider.h"
 
 static void test_lookup(void)
@@ -11,8 +12,15 @@ static void test_lookup(void)
     assert(we_provider_lookup("deepseek", &p));
     assert(strcmp(p->id, "deepseek") == 0);
     assert(strstr(p->url, "deepseek.com"));
+    // host 要能塞进 WE_DIAG_HOST_MAX 的网络探测缓冲,而且必须是纯域名
+    assert(strcmp(p->host, "api.deepseek.com") == 0);
+    assert(strchr(p->host, '/') == NULL);
+    assert(strlen(p->host) < WE_DIAG_HOST_MAX);
     assert(we_provider_lookup("kimi", &p));
     assert(strstr(p->url, "moonshot.cn"));
+    assert(strcmp(p->host, "api.moonshot.cn") == 0);
+    assert(strlen(p->host) < WE_DIAG_HOST_MAX);
+    assert(strstr(p->url, p->host) != NULL);        // host 必须真是 url 里那一段
     assert(!we_provider_lookup("openai", &p));
     assert(!we_provider_lookup("doubao", &p));
     assert(!we_provider_lookup("", &p));

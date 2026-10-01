@@ -12,6 +12,7 @@ typedef struct we_provider {
     const char *id;            // "deepseek"
     const char *display_name;  // "DeepSeek"
     const char *url;           // 官方余额接口
+    const char *host;          // url 里的主机名(取数失败时网络探测要用它单独解析)
 } we_provider_t;
 
 // 查找支持表(不支持返回 false)

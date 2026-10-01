@@ -41,6 +41,7 @@
 #include "esp_netif.h"
 #include "esp_sntp.h"
 #include "esp_system.h"
+#include "esp_tls.h"       // 网络自检:is_plain_tcp 探测 + 错误句柄取分类码/errno
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "lvgl.h"
@@ -137,6 +138,7 @@ static const char *TAG = "balance";
 #define REFRESH_STACK 8192
 #define FETCH_TRIES   2             // 全部失败时补一轮重试(DNS/TCP 抖动很常见)
 #define FETCH_RETRY_MS 1200
+#define PROBE_TCP_TIMEOUT_MS 5000   // 网络自检里"只建 TCP"那一步的超时(别等默认 10s+)
 
 static int row_y_by(int idx, int n);              // 行 y:上对齐,行少下方留白
 #define ROW_YS_STEP(i) row_y_by((i), s_nrow)
@@ -1028,8 +1030,79 @@ static void diag_copy_body(we_diag_row_t *dg, const char *body, size_t len)
     dg->body[o] = '\0';
 }
 
-// dg 可为 NULL。失败时回填:esp_err、mbedTLS 错误码、证书校验标志、HTTP 状态码、
-// 响应体预览 —— 屏幕上的短码由 we_diag_tag_from_err 决定(见 we_diag.h)。
+// esp_ip_addr_t → IPv4 点分字符串(非 IPv4 或空值产出空串)
+static void ip4_str(char *dst, size_t cap, const esp_ip_addr_t *a)
+{
+    if (!dst || cap == 0) return;
+    dst[0] = '\0';
+    if (!a || a->type != ESP_IPADDR_TYPE_V4) return;
+    we_diag_ip4_str(a->u_addr.ip4.addr, dst, cap);
+}
+
+// ---------------------------------------------------------------- 网络自检
+// 整轮取数全失败后跑一次,目的是把"到底是哪一层断的"钉死。
+//
+// 为什么不能只看 esp_http_client_open 的返回值:连接阶段失败时它只回一个笼统的
+// ESP_ERR_HTTP_CONNECT(0x7002) —— 它的实现(esp_http_client.c 里)是
+//     if (esp_transport_connect(...) < 0) return ESP_ERR_HTTP_CONNECT;
+// "域名没解析出来" / "TCP 连不上" / "TCP 超时" 全被折叠成同一个值。
+//
+// 这里换一个方式重跑同一条连接路径:自己持有一个 esp_tls 错误句柄,并设
+// is_plain_tcp = true —— 只做 DNS + TCP,不做 TLS 握手。好处有两点:
+//   1) 拿到的 0x800x 分类码直接说明断在哪一层(0x8001 DNS / 0x8004 CONN / 0x8006 TOUT);
+//   2) 能再从 ESP_TLS_ERR_TYPE_SYSTEM 里单独取到 socket errno(连接被拒/无路由/超时)。
+// 全程不碰证书、不握手、不申请大缓冲,所以也是一次内存低压探测,
+// 不会把"内存不够"和"TLS 被拒"两件事混在一起。
+static void net_probe(we_diag_net_t *np, const char *host)
+{
+    memset(np, 0, sizeof(*np));
+    np->probed = true;
+    if (host) snprintf(np->host, sizeof(np->host), "%s", host);
+
+    // 1) 接口状态:拿到 IP 却没拿到 DNS,是"能连上 WiFi 但什么都解析不出来"的典型病因
+    esp_netif_t *nf = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (nf) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(nf, &ip) == ESP_OK) {
+            snprintf(np->ip, sizeof(np->ip), IPSTR, IP2STR(&ip.ip));
+            snprintf(np->gw, sizeof(np->gw), IPSTR, IP2STR(&ip.gw));
+        }
+        esp_netif_dns_info_t d;
+        if (esp_netif_get_dns_info(nf, ESP_NETIF_DNS_MAIN, &d) == ESP_OK)
+            ip4_str(np->dns1, sizeof(np->dns1), &d.ip);
+        if (esp_netif_get_dns_info(nf, ESP_NETIF_DNS_BACKUP, &d) == ESP_OK)
+            ip4_str(np->dns2, sizeof(np->dns2), &d.ip);
+    }
+
+    if (!np->host[0]) return;                      // 没有可探测的域名
+
+    // 2) 只建 TCP 的连接探测
+    esp_tls_t *tls = esp_tls_init();
+    if (!tls) { np->rc = 0x8002; return; }         // 连探测对象都建不起来 = 已无内存
+
+    esp_tls_cfg_t cfg = { 0 };
+    cfg.timeout_ms   = PROBE_TCP_TIMEOUT_MS;
+    cfg.is_plain_tcp = true;
+    cfg.addr_family  = ESP_TLS_AF_INET;            // 固定 IPv4,免得卡在 IPv6 解析上
+
+    int64_t t0 = esp_timer_get_time();
+    int r = esp_tls_conn_new_sync(np->host, (int)strlen(np->host), 443, &cfg, tls);
+    np->ms = (int)((esp_timer_get_time() - t0) / 1000);
+
+    esp_tls_error_handle_t eh = NULL;
+    if (esp_tls_get_error_handle(tls, &eh) == ESP_OK && eh) {
+        int code = 0, flags = 0;
+        // 同一个坑:分类码是返回值,不是出参;而且读完即清,只能取一次。
+        np->rc = (int)esp_tls_get_and_clear_last_error(eh, &code, &flags);
+        // socket errno 存在 last_error 结构体之外(memset 清不到),所以可以后取。
+        esp_tls_get_and_clear_error_type(eh, ESP_TLS_ERR_TYPE_SYSTEM, &np->sock_errno);
+    }
+    esp_tls_conn_destroy(tls);
+    if (r > 0) np->rc = 0;                         // 连上了:清掉任何残留码
+}
+
+// dg 可为 NULL。失败时回填:open_err(0x7000 段)、tls_err(0x8000 段)、mbedTLS 码、
+// 证书校验标志、HTTP 状态码、响应体预览 —— 屏幕短码由 we_diag_tag_from_pair 决定。
 static int https_fetch_provider(const we_provider_t *prov, const char *key,
                                 char *out, size_t cap, we_diag_row_t *dg)
 {
@@ -1050,18 +1123,28 @@ static int https_fetch_provider(const we_provider_t *prov, const char *key,
 
     esp_err_t err = esp_http_client_open(cl, 0);
     if (err != ESP_OK) {
+        int tls_err = 0, tls_code = 0, tls_flags = 0;
+        // 这里的返回值不是"成功/失败",它本身就是 esp_tls 的分类码(0x8000 段)。
+        // esp_tls_get_and_clear_last_error() 的实现是:
+        //     esp_err_t last_err = h->last_error;      // ← 走返回值
+        //     *esp_tls_code  = h->esp_tls_error_code;  // ← 出参只是 mbedTLS 码
+        //     *esp_tls_flags = h->esp_tls_flags;
+        //     memset(h, 0, sizeof(esp_tls_last_error_t));   // 读完即清,只能取一次
+        // 也就是说:真出问题时它"非 0",而 0 才代表没有记录。必须原样接住,
+        // 不能拿 != ESP_OK 当成失败标志去清零(那正好把唯一有用的信息抹掉)。
+        tls_err = (int)esp_http_client_get_and_clear_last_tls_error(cl, &tls_code, &tls_flags);
         if (dg) {
-            int tls_code = 0, tls_flags = 0;
-            if (esp_http_client_get_and_clear_last_tls_error(cl, &tls_code, &tls_flags) != ESP_OK) {
-                tls_code = 0;
-                tls_flags = 0;
-            }
             dg->open_err  = (int)err;
+            dg->tls_err   = tls_err;
             dg->tls_code  = tls_code;
             dg->tls_flags = tls_flags;
-            we_diag_tag_from_err((int)err, dg->tag, sizeof(dg->tag));
+            // open_err 在连接阶段只会是笼统的 ESP_ERR_HTTP_CONNECT(0x7002),
+            // 底层原因在 tls_err 里,由它优先。
+            we_diag_tag_from_pair((int)err, tls_err, dg->tag, sizeof(dg->tag));
         }
-        ESP_LOGW(TAG, "HTTPS open %s 失败: %s", prov->url, esp_err_to_name(err));
+        ESP_LOGW(TAG, "HTTPS open %s 失败: %s open_err=0x%X tls_err=0x%X mbed=%d flags=0x%X",
+                 prov->url, esp_err_to_name(err), (unsigned)err, (unsigned)tls_err,
+                 tls_code, (unsigned)tls_flags);
         esp_http_client_cleanup(cl);
         return -2;
     }
@@ -1454,6 +1537,38 @@ static void balance_worker(void *arg)
                      prov->id, gotd, ok, dr.tag, dr.millis);
         }
         if (n_ok > 0) break;                        // 有平台成功就不再来一轮
+    }
+
+    // 整轮全灭 → 立刻做一次独立探测,把"哪一层断了"钉死。
+    // 必须在 wifi_teardown() 之前:接口一拆,探测就没有意义了。
+    if (!s_cancel && n_ok == 0 && n > 0) {
+        we_diag_set_stage("PROBE");
+        const we_provider_t *p0 = NULL;
+        const char *phost = NULL;
+        if (we_provider_lookup(s_cfg.prov[0].provider_id, &p0) && p0) phost = p0->host;
+        static we_diag_net_t np;                    // 不放栈上:本任务栈只有 REFRESH_STACK
+        net_probe(&np, phost);
+        we_diag_set_net(&np);
+        diag_env(0, time_synced());                 // 重取一次堆:顺便看探测本身花了多少
+
+        // 兜底码 0x7002 说不出是 DNS 还是 TCP,自检能。只在没有更权威结论时才细化:
+        //   0x8001           → 域名根本没解析出来
+        //   0x8004 / 0x8006  → 域名解析了但 TCP 连不上,再用 errno 说清是被拒还是超时
+        if (np.rc != 0) {
+            char rt[WE_DIAG_TAG_MAX];
+            char et[WE_DIAG_TAG_MAX];
+            const char *use = rt;
+            we_diag_tag_from_err(np.rc, rt, sizeof(rt));
+            if ((np.rc == 0x8004 || np.rc == 0x8006) && np.sock_errno != 0) {
+                we_diag_tag_from_errno(np.sock_errno, et, sizeof(et));
+                use = et;
+            }
+            for (int i = 0; i < n && i < WE_DIAG_ROWS; i++)
+                we_diag_refine_conn_tag(i, use);
+        }
+        ESP_LOGW(TAG, "网络自检 host=%s ip=%s gw=%s dns=%s/%s rc=0x%X errno=%d %dms",
+                 np.host, np.ip, np.gw, np.dns1, np.dns2,
+                 (unsigned)np.rc, np.sock_errno, np.ms);
     }
 
     if (!s_cancel) {

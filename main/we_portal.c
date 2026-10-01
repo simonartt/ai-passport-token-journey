@@ -544,6 +544,11 @@ static esp_err_t diag_get(httpd_req_t *req)
     static we_cfg_t  cfg;
     snap = *we_diag_get();                 // 拷一份:刷新任务可能正在改写
     snap.stage[sizeof(snap.stage) - 1] = '\0';
+    snap.net.host[sizeof(snap.net.host) - 1] = '\0';
+    snap.net.ip[sizeof(snap.net.ip) - 1]     = '\0';
+    snap.net.gw[sizeof(snap.net.gw) - 1]     = '\0';
+    snap.net.dns1[sizeof(snap.net.dns1) - 1] = '\0';
+    snap.net.dns2[sizeof(snap.net.dns2) - 1] = '\0';
     for (int i = 0; i < WE_DIAG_ROWS; i++) {
         snap.row[i].id[sizeof(snap.row[i].id) - 1] = '\0';
         snap.row[i].tag[sizeof(snap.row[i].tag) - 1] = '\0';
@@ -566,10 +571,36 @@ static esp_err_t diag_get(httpd_req_t *req)
               (unsigned long)snap.free_heap, (unsigned long)snap.min_free_heap,
               (unsigned long)snap.largest_block);
     diag_line(req, "portal   : mode=%d  ip=%s", (int)s_mode, s_ip[0] ? s_ip : "(none)");
+
+    // 网络自检:整轮取数全失败时跑的那一次独立探测。open_err 的 0x7002
+    // (ESP_ERR_HTTP_CONNECT)只说"连接阶段失败",哪一层断的要看这一节。
+    if (snap.net.probed) {
+        char rct[WE_DIAG_TAG_MAX];
+        char ent[WE_DIAG_TAG_MAX];
+        we_diag_tag_from_err(snap.net.rc, rct, sizeof(rct));
+        we_diag_tag_from_errno(snap.net.sock_errno, ent, sizeof(ent));
+        diag_line(req, "");
+        diag_line(req, "--- 网络自检(独立探测,只做 DNS+TCP,不握手)---");
+        diag_line(req, "netif    : ip=%s  gw=%s",
+                  snap.net.ip[0] ? snap.net.ip : "(none)",
+                  snap.net.gw[0] ? snap.net.gw : "(none)");
+        diag_line(req, "dns      : main=%s  backup=%s",
+                  snap.net.dns1[0] ? snap.net.dns1 : "(none)",
+                  snap.net.dns2[0] ? snap.net.dns2 : "(none)");
+        diag_line(req, "probe    : host=%s  rc=0x%04X(%s)  errno=%d(%s)  %dms",
+                  snap.net.host, (unsigned)snap.net.rc, rct,
+                  snap.net.sock_errno, ent, snap.net.ms);
+        diag_line(req, "判定     : rc==0 → DNS 和 TCP 都通,问题在 TLS/证书/内存");
+        diag_line(req, "           rc==0x8001 → 域名解析不出来;0x8002 → 连 socket 都建不起来");
+        diag_line(req, "           rc==0x8004/0x8006 → TCP 连不上/超时,再看 errno:");
+        diag_line(req, "           errno 111=被拒 110=超时 101=无路由 113=主机不可达 104=被重置");
+    }
     diag_line(req, "");
-    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/FETCH/RETRY/DONE/FAIL/CANCEL");
+    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/FETCH/RETRY/PROBE/DONE/FAIL/CANCEL");
     diag_line(req, "tag 含义: DNS=域名没解析出来  CONN=连不上主机  TOUT=连接超时");
     diag_line(req, "          TLS/TLSTO=握手失败  X509=证书解析失败  SOCK/PROTO=建连失败");
+    diag_line(req, "          CERT=证书链被拒(多半是缺时间或 CA)  SETOPT=套接字选项失败");
+    diag_line(req, "          NOTRANS=没启用 HTTPS  WRITE/HDR=收发失败  RDTO=读超时  SHORT=数据不全");
     diag_line(req, "          401/403=Key 无效或无权限  429=限流  5xx=服务端异常");
     diag_line(req, "          JSON=通了但没解析出金额  NOKEY=Key 为空  NOSTAT=没拿到状态码");
     diag_line(req, "");
@@ -612,6 +643,12 @@ static esp_err_t diag_get(httpd_req_t *req)
         diag_line(req, "           open_err=0x%04X(%s)  http_status=%d  body_len=%d",
                   (unsigned)r->open_err, esp_err_to_name((esp_err_t)r->open_err),
                   r->http_status, r->body_len);
+        if (r->tls_err) {
+            char tt[WE_DIAG_TAG_MAX];
+            we_diag_tag_from_err(r->tls_err, tt, sizeof(tt));
+            diag_line(req, "           tls_err=0x%04X(%s)  ← esp_tls 记下的真正原因",
+                      (unsigned)r->tls_err, tt);
+        }
         if (r->tls_code || r->tls_flags) {
             diag_line(req, "           tls_code=%d(-0x%X)  tls_flags=0x%X",
                       r->tls_code,
