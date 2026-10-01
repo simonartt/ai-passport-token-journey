@@ -46,6 +46,19 @@ CONFIG_FREERTOS_HZ=1000
 # (app_balance.c 里依次填 ntp.aliyun.com / cn.pool.ntp.org / time1.cloud.tencent.com)。
 CONFIG_LWIP_SNTP_MAX_SERVERS=3
 
+# --- TLS 内存 ---
+# 实测(CI 诊断 /diag):free=81KB 但最大连续块只有 29.7KB,历史最低堆 176 字节,
+# mbedTLS 握手要一整块 16KB 接收缓冲(RX 默认 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384)
+# 再叠 4KB 发送缓冲,在碎片化的堆上直接分配失败,屏幕短码只显示 TLS(0x8011-0x801D)。
+# 余额接口的响应体只有几百字节,证书链(leaf+中间证书)通常 4KB 左右:
+#   RX 16384 -> 6144 : 省 10KB 握手峰值(单条 TLS 记录很少超过 4KB)
+#   TX  4096 -> 1024 : 请求体为 0,只发 ClientHello,省 3KB
+#   不保留对端证书    : 握手完即释放,再省约 4KB(Kconfig 文档标称值)
+# 若今后换成证书链更大的服务端导致握手报 X509/INVALID_RECORD,先把 RX 调回 8192。
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=6144
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=1024
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=n
+
 # --- Bluetooth LE / NimBLE ---
 # ESP32-C3 仅支持 BLE；示例只启用单连接 peripheral 所需的最小 host 配置。
 CONFIG_BT_ENABLED=y

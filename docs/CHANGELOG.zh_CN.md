@@ -44,6 +44,17 @@
   分开,并快照本机 IP、网关与 DHCP 下发的 DNS,一并打印进 `/diag` 的"网络自检"段——`0x7002` 这个
   兜底码终于说得出人话。
 
+- 用 v1.1.3 的诊断抓到 `DIRECT FAIL` 的真凶并修掉(v1.1.4):实测 `/diag` 显示
+  `heap: free=81444 min_free=176 largest_block=29696`——总空闲 81KB,但**最大连续块只有 29.7KB**,
+  历史最低堆一度只剩 **176 字节**。mbedTLS 握手要分配一整块 16KB 接收缓冲(IDF 默认
+  `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384`)再叠 4KB 发送缓冲,在这种碎片化的堆上直接分配失败,
+  于是屏幕只剩一个 `TLS` 短码。原版固件没有 mDNS/门户/备份/诊断这些常驻开销,同一台设备自然握手得动
+  ——这就是"原版能连、社区版连不上"的完整解释。修复(全部是 sdkconfig 层面,不改取数逻辑):
+  RX 缓冲 16384→6144(余额接口响应只有几百字节,证书链通常 4KB 左右,单条 TLS 记录极少超过 4KB)、
+  TX 缓冲 4096→1024(请求体为 0,只发 ClientHello)、握手后不再保留对端证书(再省约 4KB)。
+  合计把握手峰值砍掉约 17KB。`/diag` 的 heap 行现在会在最大连续块不足 24KB 时显式标注
+  "连续块不足,握手大概率失败"。
+
 ## 2026-09-05
 
 - **feature/community-skeleton**:Token 余额玩法社区版——SoftAP 配置门户(`we_portal`)、配置模型(`we_cfg`)、平台适配层(`we_provider`,DeepSeek/Kimi HTTPS 直连余额)、动态平台行、锁屏签名昵称化;新增 `we_cfg`/`we_provider` host 测试。

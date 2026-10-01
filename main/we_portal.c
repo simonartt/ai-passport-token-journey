@@ -567,9 +567,19 @@ static esp_err_t diag_get(httpd_req_t *req)
               snap.clock_ok ? "synced" : "NOT-SYNCED");
     diag_line(req, "wifi     : rc=%d  (0=connected, -n=wifi_connect_once fail)",
               snap.wifi_rc);
-    diag_line(req, "heap     : free=%lu  min_free=%lu  largest_block=%lu",
-              (unsigned long)snap.free_heap, (unsigned long)snap.min_free_heap,
-              (unsigned long)snap.largest_block);
+    // 堆与 TLS 握手的关系:mbedTLS 握手需要 ~40KB 峰值(在 16KB 接收缓冲时代;
+    // v1.1.4 起缓冲砍到 6KB+1KB 后需求低得多),最大连续块不够就会以"TLS"短码收场。
+    // 这一行曾是定位"原版能连、社区版连不上"的关键证据(largest_block=29696)。
+    if (snap.largest_block && snap.largest_block < 24 * 1024) {
+        diag_line(req, "heap     : free=%lu  min_free=%lu  largest_block=%lu"
+                       "  <- 连续块不足,握手大概率失败",
+                  (unsigned long)snap.free_heap, (unsigned long)snap.min_free_heap,
+                  (unsigned long)snap.largest_block);
+    } else {
+        diag_line(req, "heap     : free=%lu  min_free=%lu  largest_block=%lu",
+                  (unsigned long)snap.free_heap, (unsigned long)snap.min_free_heap,
+                  (unsigned long)snap.largest_block);
+    }
     diag_line(req, "portal   : mode=%d  ip=%s", (int)s_mode, s_ip[0] ? s_ip : "(none)");
 
     // 网络自检:整轮取数全失败时跑的那一次独立探测。open_err 的 0x7002
