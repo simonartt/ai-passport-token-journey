@@ -7,7 +7,10 @@
 #include "demo_radio.h"   // demo_radio_nvs_prepare / demo_radio_network_prepare(幂等初始化)
 #include "we_backup.h"    // 配置 + 历史整份导出/恢复(GET /backup、POST /restore)
 #include "we_cfg.h"
+#include "we_diag.h"      // 上一次余额刷新的诊断快照(GET /diag)
 
+#include "esp_app_desc.h"
+#include "esp_err.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -23,6 +26,7 @@
 #include "freertos/task.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -319,7 +323,9 @@ static esp_err_t root_get(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "\"></div>"
         "<button class=\"btn\" type=\"submit\">保存并重启</button>"
-        "</form><p class=\"hint\">保存后设备会重启;密钥只存在设备 NVS,丢失设备即泄露 Key,建议用只读/低配额 Key。</p>"
+        "</form>"
+        "<a class=\"btn btn2\" href=\"/diag\" target=\"_blank\">取数诊断(余额取不到时看这里)</a>"
+        "<p class=\"hint\">保存后设备会重启;密钥只存在设备 NVS,丢失设备即泄露 Key,建议用只读/低配额 Key。</p>"
         "<h2>备份与恢复</h2>"
         "<p class=\"hint\">备份含明文 API Key 与 30 天消耗记录,请只存放在自己的设备上,不要外传。</p>"
         "<a class=\"btn btn2\" href=\"/backup\" download>下载备份文件(.json)</a>"
@@ -511,6 +517,115 @@ static esp_err_t restore_post(httpd_req_t *req)
     return sent;
 }
 
+// ---------------------------------------------------------------- 取数诊断 /diag
+// 余额刷新失败时屏幕上只有一行 "DIRECT FAIL",但那句话只说明"WiFi 连上了、一个
+// 平台都没查到"。到底卡在哪一步,只有设备自己知道。这个页面把上一次刷新的诊断
+// 快照打成纯文本(整段复制发出来就能定位),包含:
+//   卡在哪一步 / esp_err / mbedTLS 错误码 / 证书校验标志 / HTTP 状态码 /
+//   响应体预览 / 堆余量,以及当前实际生效的配置(Key 只给长度和尾号)。
+static void diag_line(httpd_req_t *req, const char *fmt, ...)
+{
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    httpd_resp_sendstr_chunk(req, buf);
+    httpd_resp_sendstr_chunk(req, "\n");
+}
+
+static esp_err_t diag_get(httpd_req_t *req)
+{
+    if (!portal_auth_ok(req)) return portal_ask_auth(req);
+
+    // 用 static 而不是局部变量:httpd 任务的栈只有 4KB,we_cfg_t + we_diag_t
+    // 加起来就 2KB 了。handler 本身是串行执行的,不存在重入。
+    static we_diag_t snap;
+    static we_cfg_t  cfg;
+    snap = *we_diag_get();                 // 拷一份:刷新任务可能正在改写
+    snap.stage[sizeof(snap.stage) - 1] = '\0';
+    for (int i = 0; i < WE_DIAG_ROWS; i++) {
+        snap.row[i].id[sizeof(snap.row[i].id) - 1] = '\0';
+        snap.row[i].tag[sizeof(snap.row[i].tag) - 1] = '\0';
+        snap.row[i].body[sizeof(snap.row[i].body) - 1] = '\0';
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    diag_line(req, "=== Token Journey refund diagnostics ===");
+    diag_line(req, "build    : %s   idf %s   %s %s",
+              app->version, app->idf_ver, app->date, app->time);
+    diag_line(req, "refresh  : #%lu  stage=%s  ok=%d/%d  clock=%s",
+              (unsigned long)snap.seq, snap.stage, snap.n_ok, snap.n_total,
+              snap.clock_ok ? "synced" : "NOT-SYNCED");
+    diag_line(req, "wifi     : rc=%d  (0=connected, -n=wifi_connect_once fail)",
+              snap.wifi_rc);
+    diag_line(req, "heap     : free=%lu  min_free=%lu  largest_block=%lu",
+              (unsigned long)snap.free_heap, (unsigned long)snap.min_free_heap,
+              (unsigned long)snap.largest_block);
+    diag_line(req, "portal   : mode=%d  ip=%s", (int)s_mode, s_ip[0] ? s_ip : "(none)");
+    diag_line(req, "");
+    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/FETCH/RETRY/DONE/FAIL/CANCEL");
+    diag_line(req, "tag 含义: DNS=域名没解析出来  CONN=连不上主机  TOUT=连接超时");
+    diag_line(req, "          TLS/TLSTO=握手失败  X509=证书解析失败  SOCK/PROTO=建连失败");
+    diag_line(req, "          401/403=Key 无效或无权限  429=限流  5xx=服务端异常");
+    diag_line(req, "          JSON=通了但没解析出金额  NOKEY=Key 为空  NOSTAT=没拿到状态码");
+    diag_line(req, "");
+
+    if (we_cfg_load(&cfg)) {
+        diag_line(req, "--- 设备当前生效的配置 ---");
+        diag_line(req, "counts   : wifi=%u  prov=%u  nickname=\"%s\"",
+                  (unsigned)cfg.wifi_count, (unsigned)cfg.prov_count, cfg.nickname);
+        for (uint8_t i = 0; i < cfg.wifi_count && i < WE_CFG_MAX_WIFI; i++) {
+            diag_line(req, "wifi[%u]  : ssid=\"%s\"  pass_len=%u  host=\"%s\"",
+                      (unsigned)i, cfg.wifi[i].ssid,
+                      (unsigned)strlen(cfg.wifi[i].pass), cfg.wifi[i].host);
+        }
+        for (uint8_t i = 0; i < cfg.prov_count && i < WE_CFG_MAX_PROV; i++) {
+            char clean[WE_CFG_MAX_KEY];
+            char tail[8] = "";
+            we_cfg_sanitize_key(cfg.prov[i].api_key, clean, sizeof(clean));
+            size_t len = strlen(clean);
+            if (len > 4) text_copy(tail, sizeof(tail), clean + len - 4);
+            diag_line(req, "prov[%u]  : id=\"%s\"  key_len=%u  key_tail=%s",
+                      (unsigned)i, cfg.prov[i].provider_id, (unsigned)len,
+                      tail[0] ? tail : "----");
+            if (strcmp(clean, cfg.prov[i].api_key) != 0)
+                diag_line(req, "           ^ 注意:存进 NVS 的 Key 含空白/控制字符,"
+                               "已按清洗后的值发请求(重新保存一次可清掉)");
+        }
+    } else {
+        diag_line(req, "--- 读不到设备配置(we_cfg_load 失败)---");
+    }
+    diag_line(req, "");
+
+    diag_line(req, "--- 上一次刷新,逐平台 ---");
+    bool any = false;
+    for (int i = 0; i < WE_DIAG_ROWS; i++) {
+        const we_diag_row_t *r = &snap.row[i];
+        if (!r->id[0]) continue;
+        any = true;
+        diag_line(req, "row[%d]   : %s  tag=%s  parsed=%d  tries=%d  %dms",
+                  i, r->id, r->tag, (int)r->parsed, r->attempts, r->millis);
+        diag_line(req, "           open_err=0x%04X(%s)  http_status=%d  body_len=%d",
+                  (unsigned)r->open_err, esp_err_to_name((esp_err_t)r->open_err),
+                  r->http_status, r->body_len);
+        if (r->tls_code || r->tls_flags) {
+            diag_line(req, "           tls_code=%d(-0x%X)  tls_flags=0x%X",
+                      r->tls_code,
+                      (unsigned)(r->tls_code < 0 ? -r->tls_code : r->tls_code),
+                      (unsigned)r->tls_flags);
+        }
+        if (r->body[0]) diag_line(req, "           body: %s", r->body);
+    }
+    if (!any) diag_line(req, "(还没有刷新记录:先回余额页按一次 OK,再回来刷新本页)");
+
+    httpd_resp_sendstr_chunk(req, "\n(把上面整段复制出来即可定位问题)\n");
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
 static esp_err_t register_handlers(void)
 {
     const httpd_uri_t handlers[] = {
@@ -518,6 +633,7 @@ static esp_err_t register_handlers(void)
         { .uri = "/save", .method = HTTP_POST, .handler = save_post },
         { .uri = "/backup", .method = HTTP_GET, .handler = backup_get },
         { .uri = "/restore", .method = HTTP_POST, .handler = restore_post },
+        { .uri = "/diag", .method = HTTP_GET, .handler = diag_get },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {
         esp_err_t err = httpd_register_uri_handler(s_server, &handlers[i]);

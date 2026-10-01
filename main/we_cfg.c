@@ -121,9 +121,47 @@ bool we_cfg_set_prov_key(we_cfg_t *cfg, const char *provider_id, const char *api
 {
     if (!cfg || !provider_id || !provider_id[0]) return false;
     if (api_key && api_key[0]) {
-        return we_cfg_add_prov(cfg, provider_id, api_key, label);
+        // 先清洗:粘贴带来的空白/换行不能进 NVS,否则每次请求都会拼出非法 HTTP 头。
+        char clean[WE_CFG_MAX_KEY];
+        if (!we_cfg_sanitize_key(api_key, clean, sizeof(clean)))
+            return we_cfg_has_prov(cfg, provider_id);   // 只剩空白 = 没填
+        return we_cfg_add_prov(cfg, provider_id, clean, label);
     }
     return we_cfg_has_prov(cfg, provider_id);   // 空 = 不修改
+}
+
+bool we_cfg_sanitize_key(const char *in, char *out, size_t cap)
+{
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!in) return false;
+
+    // 跳过前导空白,再看是不是把 "Bearer xxx" 整段粘进来了
+    const char *p = in;
+    while (*p && (unsigned char)*p <= ' ') p++;
+    static const char prefix[] = "bearer";
+    bool is_bearer = true;
+    for (size_t i = 0; i < sizeof(prefix) - 1; i++) {
+        char c = p[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != prefix[i]) { is_bearer = false; break; }
+    }
+    if (is_bearer) {
+        const char *q = p + (sizeof(prefix) - 1);
+        if (*q == '\0' || (unsigned char)*q <= ' ') {   // "Bearer" 后面必须是空白
+            while (*q == ' ' || *q == '\t') q++;
+            p = q;
+        }
+    }
+
+    size_t o = 0;
+    for (; *p && o + 1 < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= ' ' || c == 0x7F) continue;   // 空白与控制字符一律丢掉
+        out[o++] = (char)c;
+    }
+    out[o] = '\0';
+    return o > 0;
 }
 
 bool we_cfg_has_prov(const we_cfg_t *cfg, const char *provider_id)

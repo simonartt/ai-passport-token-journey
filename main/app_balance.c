@@ -27,6 +27,7 @@
 #include "ui_pixel.h"      // 仅复用主题常量与菜单;本页不用其屏幕
 #include "lock_hello.h"    // 锁屏薄荷绿点阵位图(自动生成)
 #include "we_cfg.h"        // 社区版配置模型(WiFi 档案 + 平台 Key + 昵称)
+#include "we_diag.h"       // 每次刷新的诊断快照(门户 /diag 页面读取)
 #include "we_hist.h"       // 逐日记账数据模型(NVS 存取;门户备份模块共用)
 #include "we_provider.h"   // 平台适配:直连官方余额接口
 #include "we_portal.h"     // we_cfg_load / we_cfg_save(NVS 存取)
@@ -34,10 +35,13 @@
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "lvgl.h"
 #include "nvs.h"
@@ -129,7 +133,10 @@ static const char *TAG = "balance";
 #define WIFI_WAIT_MS   pdMS_TO_TICKS(20000)
 #define HTTP_TIMEOUT_MS 12000
 #define RESP_MAX      4096          // usage[30] 加入后响应 ~2KB,留余量
-#define REFRESH_STACK 6144
+// mbedTLS 握手本身就要吃掉几 KB 栈,6KB 在 C3(无 PSRAM)上贴边;抬高一点更稳。
+#define REFRESH_STACK 8192
+#define FETCH_TRIES   2             // 全部失败时补一轮重试(DNS/TCP 抖动很常见)
+#define FETCH_RETRY_MS 1200
 
 static int row_y_by(int idx, int n);              // 行 y:上对齐,行少下方留白
 #define ROW_YS_STEP(i) row_y_by((i), s_nrow)
@@ -1006,8 +1013,25 @@ static int wifi_connect_once(const bal_prof_t *p)
 }
 
 // ---------------------------------------------------------------- 平台直连(HTTPS 官方余额)
+// 把响应体前若干字节收进诊断快照:丢掉控制字符(换行/制表折成空格),
+// 其余原样保留(>0x7F 的字节是 UTF-8 中文,不能当垃圾滤掉)。
+static void diag_copy_body(we_diag_row_t *dg, const char *body, size_t len)
+{
+    if (!dg || !body) return;
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 1 < sizeof(dg->body); i++) {
+        unsigned char c = (unsigned char)body[i];
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (c < 0x20 || c == 0x7F) continue;
+        dg->body[o++] = (char)c;
+    }
+    dg->body[o] = '\0';
+}
+
+// dg 可为 NULL。失败时回填:esp_err、mbedTLS 错误码、证书校验标志、HTTP 状态码、
+// 响应体预览 —— 屏幕上的短码由 we_diag_tag_from_err 决定(见 we_diag.h)。
 static int https_fetch_provider(const we_provider_t *prov, const char *key,
-                                char *out, size_t cap)
+                                char *out, size_t cap, we_diag_row_t *dg)
 {
     esp_http_client_config_t hcfg = {
         .url = prov->url,
@@ -1026,12 +1050,25 @@ static int https_fetch_provider(const we_provider_t *prov, const char *key,
 
     esp_err_t err = esp_http_client_open(cl, 0);
     if (err != ESP_OK) {
+        if (dg) {
+            int tls_code = 0, tls_flags = 0;
+            if (esp_http_client_get_and_clear_last_tls_error(cl, &tls_code, &tls_flags) != ESP_OK) {
+                tls_code = 0;
+                tls_flags = 0;
+            }
+            dg->open_err  = (int)err;
+            dg->tls_code  = tls_code;
+            dg->tls_flags = tls_flags;
+            we_diag_tag_from_err((int)err, dg->tag, sizeof(dg->tag));
+        }
         ESP_LOGW(TAG, "HTTPS open %s 失败: %s", prov->url, esp_err_to_name(err));
         esp_http_client_cleanup(cl);
         return -2;
     }
     esp_http_client_fetch_headers(cl);
-    ESP_LOGI(TAG, "HTTPS %s 状态=%d", prov->id, esp_http_client_get_status_code(cl));
+    int status = esp_http_client_get_status_code(cl);
+    if (dg) dg->http_status = status;
+    ESP_LOGI(TAG, "HTTPS %s 状态=%d", prov->id, status);
 
     size_t used = 0;
     int r;
@@ -1040,6 +1077,10 @@ static int https_fetch_provider(const we_provider_t *prov, const char *key,
         used += (size_t)r;
     }
     out[used] = '\0';
+    if (dg) {
+        dg->body_len = (int)used;
+        diag_copy_body(dg, out, used);
+    }
     esp_http_client_close(cl);
     esp_http_client_cleanup(cl);
     return (int)used;
@@ -1054,6 +1095,14 @@ static void ensure_sntp(void)
     if (s_sntp_done) return;
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "ntp.aliyun.com");
+    // 多备两台:某些路由器/园区网会拦 UDP 123,或让某台 NTP 不可达。
+    // 台数上限由 CONFIG_LWIP_SNTP_MAX_SERVERS 决定(默认 1,本项目设为 3)。
+#if CONFIG_LWIP_SNTP_MAX_SERVERS > 1
+    esp_sntp_setservername(1, "cn.pool.ntp.org");
+#endif
+#if CONFIG_LWIP_SNTP_MAX_SERVERS > 2
+    esp_sntp_setservername(2, "time1.cloud.tencent.com");
+#endif
     esp_sntp_init();
     s_sntp_done = true;
 }
@@ -1223,10 +1272,21 @@ static void hist_build_usage(uint16_t today, const float *cur, const bool *ok, i
     s_usage_ok = true;
 }
 
+// 把堆统计和联网结果记进诊断快照(TLS 握手最吃"最大连续块",C3 无 PSRAM 要盯着)
+static void diag_env(int wifi_rc, bool clock_ok)
+{
+    we_diag_set_env(wifi_rc, clock_ok,
+                    (uint32_t)esp_get_free_heap_size(),
+                    (uint32_t)esp_get_minimum_free_heap_size(),
+                    (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+}
+
 static void balance_worker(void *arg)
 {
     (void)arg;
     int gen = s_gen;
+    we_diag_reset();
+    we_diag_set_stage("CONFIG");
 
     // 1. 状态提示
     if (!s_cancel) {
@@ -1237,6 +1297,7 @@ static void balance_worker(void *arg)
 
     // 2. NVS + 社区配置(必须先初始化 NVS,示例封装幂等可重复调)
     if (demo_radio_nvs_prepare() != ESP_OK) {
+        we_diag_set_stage("NVS");
         if (!s_cancel) {
             bsp_lvgl_lock(1000);
             set_state("NVS FAIL");
@@ -1247,6 +1308,7 @@ static void balance_worker(void *arg)
         return;
     }
     if (!cfg_load_local()) {
+        we_diag_set_stage("NO WIFI");
         if (!s_cancel) {
             bsp_lvgl_lock(1000);
             set_state("NO WIFI");
@@ -1261,6 +1323,7 @@ static void balance_worker(void *arg)
     // 一个平台 Key 都没有 → 联网也没有可查的对象。直接点明原因,别让下面的
     // 取数循环空跑一轮再报 DIRECT FAIL(那个提示会被误读成网络问题)。
     if (s_cfg.prov_count == 0) {
+        we_diag_set_stage("NO KEY");
         ESP_LOGW(TAG, "没有平台 Key,请到 Portal 填 API Key");
         if (!s_cancel) {
             bsp_lvgl_lock(1000);
@@ -1274,6 +1337,7 @@ static void balance_worker(void *arg)
     }
 
     // 3. 联网:按档案顺序尝试
+    we_diag_set_stage("WIFI");
     int rc = -1;
     for (int i = 0; i < s_nprof; i++) {
         if (s_cancel) break;
@@ -1285,6 +1349,8 @@ static void balance_worker(void *arg)
         ESP_LOGW(TAG, "档案[%d] %s 失败 rc=%d", i, s_prof[i].ssid, rc);
     }
     if (rc != 0) {
+        we_diag_set_stage("WIFI FAIL");
+        diag_env(rc, false);
         if (!s_cancel) {
             bsp_lvgl_lock(1000);
             set_state("WIFI FAIL");
@@ -1295,14 +1361,21 @@ static void balance_worker(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    if (s_cancel) { wifi_teardown(); s_busy = false; vTaskDelete(NULL); return; }
+    if (s_cancel) {
+        we_diag_set_stage("CANCEL");
+        wifi_teardown(); s_busy = false; vTaskDelete(NULL); return;
+    }
 
     // 4. 直连官方余额(只查已配置平台),同时收实时余额做本地记账
-    // 先校时再发请求:HTTPS 走证书包校验,会比对证书有效期,冷启动时 RTC 还停在
-    // 1970,证书会被判成"尚未生效"而握手失败 —— 所有平台一起失败,屏幕只剩
-    // DIRECT FAIL。原来的等待放在取数之后,等于第一次刷新必然拿不到数。
+    //
+    // 先把本地时间校好再发请求。ESP-IDF 默认不开证书有效期校验
+    // (CONFIG_MBEDTLS_HAVE_TIME_DATE=n),所以这一步不是 TLS 的前提;但记账天界
+    // 和 UPDATED 行都依赖本地时间,而且校时本身也顺带证明 DNS/UDP 通不通。
+    we_diag_set_stage("SNTP");
     ensure_sntp();                       // 直连需要本地时间(更新时间/记账天界)
     wait_sntp(SNTP_WAIT_MS);
+    diag_env(0, time_synced());
+    we_diag_set_stage("FETCH");
     int n = s_cfg.prov_count;
     if (n > ROW_COUNT) n = ROW_COUNT;
     float cur[ROW_COUNT] = { 0 };
@@ -1316,31 +1389,71 @@ static void balance_worker(void *arg)
         bsp_lvgl_unlock();
     }
 
-    for (int k = 0; k < n && !s_cancel; k++) {
-        const we_provider_t *prov = NULL;
-        if (!we_provider_lookup(s_cfg.prov[k].provider_id, &prov)) continue;
-        static char dresp[RESP_MAX];
-        int gotd = https_fetch_provider(prov, s_cfg.prov[k].api_key, dresp, sizeof(dresp));
-        char amt[24];
-        bool ok = gotd > 0 && we_provider_parse(prov->id, dresp, amt, sizeof(amt));
-        double v = ok ? strtod(amt, NULL) : 0;
-        cur[k] = (float)v;
-        okr[k] = ok;
-        if (ok) { total += v; n_ok++; }
-        if (!s_cancel) {
-            bsp_lvgl_lock(1000);
-            if (ok) {
-                char dsp[24];
-                snprintf(dsp, sizeof(dsp), "%.2f", v);
-                dot_set(k, C_DOT_GREEN);
-                amount_set(k, dsp);
-            } else {
-                dot_set(k, C_DOT_RED);
-                amount_set(k, "---");
-            }
-            bsp_lvgl_unlock();
+    // 逐平台取数;若整轮一个都没成功(DNS/握手抖动很常见),补跑一轮再判定失败。
+    for (int attempt = 0; attempt < FETCH_TRIES && !s_cancel; attempt++) {
+        if (attempt > 0) {
+            we_diag_set_stage("RETRY");
+            ESP_LOGW(TAG, "首轮全灭,%d ms 后重试一轮", FETCH_RETRY_MS);
+            vTaskDelay(pdMS_TO_TICKS(FETCH_RETRY_MS));
         }
-        ESP_LOGI(TAG, "direct %s got=%d ok=%d", prov->id, gotd, ok);
+        for (int k = 0; k < n && !s_cancel; k++) {
+            if (okr[k]) continue;                   // 重试只补失败的行
+            const we_provider_t *prov = NULL;
+            if (!we_provider_lookup(s_cfg.prov[k].provider_id, &prov)) continue;
+
+            we_diag_row_t dr;
+            memset(&dr, 0, sizeof(dr));
+            dr.http_status = -1;
+            dr.attempts    = attempt + 1;
+            snprintf(dr.id, sizeof(dr.id), "%s", prov->id);
+
+            // 老 NVS 里可能存着带空白/换行的 Key(粘贴进来的),发请求前再洗一遍。
+            char kbuf[WE_CFG_MAX_KEY];
+            if (!we_cfg_sanitize_key(s_cfg.prov[k].api_key, kbuf, sizeof(kbuf)))
+                kbuf[0] = '\0';
+
+            static char dresp[RESP_MAX];
+            bool   ok = false;
+            double v  = 0;
+            int    gotd = -3;
+            int64_t t0 = esp_timer_get_time();
+            if (kbuf[0]) {
+                gotd = https_fetch_provider(prov, kbuf, dresp, sizeof(dresp), &dr);
+                if (gotd > 0) {
+                    char amt[24];
+                    ok = we_provider_parse(prov->id, dresp, amt, sizeof(amt));
+                    if (ok) v = strtod(amt, NULL);
+                }
+                // 打开成功才用状态码/解析结果定码;打开失败时上面已填好 DNS/TLS/CONN
+                if (dr.open_err == 0)
+                    we_diag_tag_from_status(dr.http_status, ok, dr.tag, sizeof(dr.tag));
+            } else {
+                snprintf(dr.tag, sizeof(dr.tag), "NOKEY");
+            }
+            dr.millis = (int)((esp_timer_get_time() - t0) / 1000);
+            we_diag_set_row(k, &dr);
+
+            cur[k] = (float)v;
+            okr[k] = ok;
+            if (ok) { total += v; n_ok++; }
+            if (!s_cancel) {
+                bsp_lvgl_lock(1000);
+                if (ok) {
+                    char dsp[24];
+                    snprintf(dsp, sizeof(dsp), "%.2f", v);
+                    dot_set(k, C_DOT_GREEN);
+                    amount_set(k, dsp);
+                } else {
+                    dot_set(k, C_DOT_RED);
+                    // 失败时把病因短码顶到金额位置:DOMAIN/TLS/401/JSON 一眼可辨
+                    amount_set(k, dr.tag[0] ? dr.tag : "---");
+                }
+                bsp_lvgl_unlock();
+            }
+            ESP_LOGI(TAG, "direct %s got=%d ok=%d tag=%s %dms",
+                     prov->id, gotd, ok, dr.tag, dr.millis);
+        }
+        if (n_ok > 0) break;                        // 有平台成功就不再来一轮
     }
 
     if (!s_cancel) {
@@ -1375,13 +1488,27 @@ static void balance_worker(void *arg)
             set_state(updated_hhmm(up, sizeof(up)) ? up : "");
             s_data_ok = true;
         } else {
-            set_state("DIRECT FAIL");
+            // 屏幕位置太窄,放不下完整原因:这里给出第一个失败平台的短码,
+            // 逐平台的完整信息(err/mbedTLS 码/证书标志/HTTP 状态/响应体)
+            // 在门户 /diag 页面上。
+            const we_diag_t *d = we_diag_get();
+            const char *tag = "?";
+            for (int i = 0; i < n && i < WE_DIAG_ROWS; i++) {
+                if (d->row[i].tag[0]) { tag = d->row[i].tag; break; }
+            }
+            char msg[26];
+            snprintf(msg, sizeof(msg), "DIRECT FAIL %.11s", tag);
+            set_state(msg);
             s_data_ok = false;
         }
         bsp_lvgl_unlock();
     }
 
+    we_diag_finish(n_ok, n);
+    we_diag_set_stage(s_cancel ? "CANCEL" : (n_ok > 0 ? "DONE" : "FAIL"));
+
     wifi_teardown();                 // 取数结束,关 Wi-Fi 省电并释放资源
+    diag_env(0, time_synced());      // 收尾再采一次堆(能看出 TLS 握手吃掉的峰值)
 
     // 5. 离开页面的迟到清理(仅当仍是本代且 exit 把清理留给了我们)
     if (s_cancel && gen == s_gen && s_scr) {

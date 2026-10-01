@@ -61,6 +61,17 @@ bool we_cfg_set_wifi(we_cfg_t *cfg, const char *ssid, const char *pass, const ch
 bool we_cfg_set_prov_key(we_cfg_t *cfg, const char *provider_id, const char *api_key,
                          const char *label);
 
+// 清洗粘贴进来的 API Key。
+//
+// 为什么需要:Key 一栏是手机/电脑上"复制-粘贴"进来的,从网页复制常常会带尾随
+// 换行或空格;换行被塞进 HTTP 头会让请求直接判非法(服务端 400/401),而现象
+// 和"Key 填错了"一模一样 —— 屏幕上只看到 DIRECT FAIL,查一晚上都找不到。
+//
+// 规则:丢掉所有 ASCII 空白与控制字符(含 '\n' '\r' '\t' 与 0x7F),
+// 并剥掉一起被复制进来的 "Bearer " 前缀(不区分大小写)。
+// 清洗后为空(比如用户只按了空格)返回 false,调用方应视作"没填"。
+bool we_cfg_sanitize_key(const char *in, char *out, size_t cap);
+
 // 该平台是否已配置(供门户显示"已配置"状态)
 bool we_cfg_has_prov(const we_cfg_t *cfg, const char *provider_id);
 

@@ -40,6 +40,12 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=48
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
+# --- 时间(SNTP)---
+# 余额页要显示 UPDATED HH:MM 并按北京时间切记账天界,所以取数前后会等校时。
+# lwIP 默认只允许配 1 台 NTP 服务器;设成 3 台,某台被拦/不可达时可以换下一台
+# (app_balance.c 里依次填 ntp.aliyun.com / cn.pool.ntp.org / time1.cloud.tencent.com)。
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
 # --- Bluetooth LE / NimBLE ---
 # ESP32-C3 仅支持 BLE；示例只启用单连接 peripheral 所需的最小 host 配置。
 CONFIG_BT_ENABLED=y

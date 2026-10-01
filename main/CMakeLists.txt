@@ -3,6 +3,7 @@ idf_component_register(
          "app_balance.c"
          "we_backup.c"
          "we_cfg.c"
+         "we_diag.c"
          "we_portal.c"
          "we_provider.c"
          "ui_pixel.c"

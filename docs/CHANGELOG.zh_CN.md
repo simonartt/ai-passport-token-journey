@@ -4,6 +4,35 @@
 
 # Changelog
 
+## 2026-10-01
+
+- 把"取数失败"从猜变成可查。屏幕上以前只会写 `DIRECT FAIL`,而域名解析失败、连不上主机、TLS 握手
+  失败、证书被拒、Key 无效、响应格式变了——这几种完全不同的病因在屏幕上长得一模一样。新增
+  `main/we_diag.{h,c}` 记录每次刷新的快照:卡在哪一步,以及每个平台的 `esp_err_t`、mbedTLS 错误码、
+  证书校验标志、HTTP 状态码、响应体预览、尝试次数与耗时,再带上空闲堆 / 历史最小堆 / 最大连续块
+  (这台无 PSRAM 的芯片上,TLS 握手能不能成基本由"最大连续块"决定)。失败行现在把短码顶在金额位置
+  (`DNS` / `CONN` / `TOUT` / `TLS` / `X509` / `401` / `JSON` / `NOKEY` / `NOSTAT`),状态行写
+  `DIRECT FAIL 401`。门户新增 `GET /diag`:同一个 Basic Auth 之后的纯文本页面(`no-store`),
+  打印这份快照 + 设备当前**实际生效**的配置(WiFi SSID、各平台 Key 的长度与尾号,以及"存进 NVS 的
+  Key 含空白/控制字符"的显式告警),配置页上有入口,整段复制就能发出来。
+
+- API Key 在保存时、以及每次发请求前各清洗一遍:丢掉所有 ASCII 空白与控制字符,并剥掉一起被复制
+  进来的 `Bearer ` 前缀。带尾随换行的 Key 会被塞进 `Authorization` 头,服务端直接按非法请求拒掉,
+  在屏幕上和"Key 填错了"完全无法区分。只剩空白的输入按"没填"处理,不会覆盖已存的 Key
+  (与增量保存的语义一致)。
+
+- 取数加固:首轮一个平台都没成功时整组重试一轮(`FETCH_TRIES`);刷新任务栈从 6KB 提到 8KB
+  (mbedTLS 握手很吃栈);SNTP 配三台服务器(`CONFIG_LWIP_SNTP_MAX_SERVERS=3`,即
+  `ntp.aliyun.com` / `cn.pool.ntp.org` / `time1.cloud.tencent.com`),避免单台 NTP 被拦之后
+  时间一直校不上却又没有任何提示。
+
+- 更正上一条里的错误结论。ESP-IDF 5.5.3 的 `CONFIG_MBEDTLS_HAVE_TIME_DATE` 默认是 `n`,也就是
+  **本固件根本不校验证书有效期**,时间从来不是 TLS 握手失败的原因。发请求前先校时这个顺序仍然保留
+  (`UPDATED` 行、记账天界都用得到,而且顺带证明 DNS/UDP 通不通),但它不是修好 `DIRECT FAIL` 的原因。
+
+- host 测试:新增 `tests/test_we_diag.c`(错误/状态短码映射、快照往返、超长串截断、极小缓冲与空指针),
+  `tests/test_we_cfg.c` 补上 Key 清洗与"增量更新 Key"的用例;`tools/validate.sh` 会跑新套件。
+
 ## 2026-09-05
 
 - **feature/community-skeleton**:Token 余额玩法社区版——SoftAP 配置门户(`we_portal`)、配置模型(`we_cfg`)、平台适配层(`we_provider`,DeepSeek/Kimi HTTPS 直连余额)、动态平台行、锁屏签名昵称化;新增 `we_cfg`/`we_provider` host 测试。
@@ -19,9 +48,9 @@
   `we_cfg_set_prov_key` / `we_cfg_del_prov`）：字段留空即保持原值（WiFi 密码留空会沿用该 SSID
   的旧密码），删除平台需勾选行内新增的「清除该平台」复选框；平台行会显式标出是否已配置
   （`已配置(尾号 cdef),留空保持不变`），保存出 0 个平台 Key 时打一条告警日志。其二，SNTP
-  等待原本排在取数循环**之后**，冷启动时 RTC 还停在 1970，TLS 证书包会把每张证书都判成
-  「尚未生效」从而握手全失败；现在改为发请求前先校时。一个平台 Key 都没有时页面直接显示
-  `NO API KEY`，不再误导成网络问题。
+  等待原本排在取数循环**之后**，第一次刷新因此拿不到 `UPDATED` 时间，记账天界也是用 1970 的时钟
+  算出来的；现在改为发请求前先校时。（本条原本把证书包判成"每张证书都尚未生效"——那是错的，
+  见 2026-10-01 那条。）一个平台 Key 都没有时页面直接显示 `NO API KEY`，不再误导成网络问题。
 
 - 干净检出即可完成固件构建：`tools/validate.sh --firmware` 现在先 `reconfigure` 拉取依赖，再重打 `esp_lvgl_port` 的 FAP_SCREENSHOT_V1 取帧钩子补丁（`scripts/patch-esp-lvgl-port.py`），最后才编译——`managed_components/` 不入库，重新解析依赖会覆盖打过补丁的源码。补上 `.github/workflows/build-firmware.yml` 与 `.github/workflows/static-checks.yml`，打 tag 即可构建并发布合并固件；`espressif/mdns` 钉到 1.13.1，让依赖解析可复现。补丁脚本改为按代码形态定位锚点，锚点缺失即让构建失败——此前上游改动后会写成「改了一半」的源码，编译照过、只在链接期报 `lvgl_port_display_set_snapshot_cb` 未定义。
 
