@@ -55,6 +55,15 @@
   合计把握手峰值砍掉约 17KB。`/diag` 的 heap 行现在会在最大连续块不足 24KB 时显式标注
   "连续块不足,握手大概率失败"。
 
+- 新增 OpenRouter 平台适配(v1.1.5):`GET https://openrouter.ai/api/v1/credits`,剩余余额 =
+  `total_credits − total_usage`(美元,两位小数)。三点须知:该接口**要求 Management Key**
+  (在 OpenRouter 后台 Keys 页生成,普通推理 key `sk-or-v1-…` 会被 403 拒掉);OpenRouter 走
+  Cloudflare + Google Trust Services 证书,国内直连实测可达,但可达性不如 DeepSeek/Kimi 稳定;
+  屏幕显示的金额单位是**美元**,与另外两家的人民币不能直接相加比较。配置页新增第三行 Key 输入。
+  调查过 duoyuanx.com(new-api v0.12.6 中转站):其 OpenAI 兼容计费接口
+  (`/v1/dashboard/billing/subscription` + `/usage`)也能算出余额,但要两次请求相减,且余额页
+  记账结构当前只有 3 行卡槽(改到 4 行需要迁移 NVS 记账 blob),故本版未加入。
+
 ## 2026-09-05
 
 - **feature/community-skeleton**:Token 余额玩法社区版——SoftAP 配置门户(`we_portal`)、配置模型(`we_cfg`)、平台适配层(`we_provider`,DeepSeek/Kimi HTTPS 直连余额)、动态平台行、锁屏签名昵称化;新增 `we_cfg`/`we_provider` host 测试。

@@ -316,6 +316,7 @@ static esp_err_t root_get(httpd_req_t *req)
         "<p class=\"hint\">留空 = 保持现有配置;要删除平台请勾下面的\"清除该平台\"</p>");
     send_prov_row(req, &cfg, "deepseek", "DeepSeek", "key_deepseek", "del_deepseek");
     send_prov_row(req, &cfg, "kimi", "Kimi(Moonshot)", "key_kimi", "del_kimi");
+    send_prov_row(req, &cfg, "openrouter", "OpenRouter(美元)", "key_openrouter", "del_openrouter");
     httpd_resp_sendstr_chunk(req,
         "<h2>锁屏签名(可选,空=不显示)</h2>"
         "<div class=\"row\"><label>昵称</label><input name=\"nickname\" maxlength=\"23\" value=\"");
@@ -394,8 +395,9 @@ static esp_err_t save_post(httpd_req_t *req)
 
     // Key 栏留空 = 保持不变;要删除平台得勾"清除"复选框
     static const struct { const char *key, *del, *id; } prov_rows[] = {
-        { "key_deepseek", "del_deepseek", "deepseek" },
-        { "key_kimi",     "del_kimi",     "kimi"     },
+        { "key_deepseek",   "del_deepseek",   "deepseek"   },
+        { "key_kimi",       "del_kimi",       "kimi"       },
+        { "key_openrouter", "del_openrouter", "openrouter" },
     };
     for (size_t i = 0; i < sizeof(prov_rows) / sizeof(prov_rows[0]); i++) {
         if (form_get(body, prov_rows[i].del, v, sizeof(v))) {

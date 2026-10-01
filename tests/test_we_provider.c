@@ -21,6 +21,11 @@ static void test_lookup(void)
     assert(strcmp(p->host, "api.moonshot.cn") == 0);
     assert(strlen(p->host) < WE_DIAG_HOST_MAX);
     assert(strstr(p->url, p->host) != NULL);        // host 必须真是 url 里那一段
+    assert(we_provider_lookup("openrouter", &p));
+    assert(strstr(p->url, "/api/v1/credits"));
+    assert(strcmp(p->host, "openrouter.ai") == 0);
+    assert(strlen(p->host) < WE_DIAG_HOST_MAX);
+    assert(strstr(p->url, p->host) != NULL);
     assert(!we_provider_lookup("openai", &p));
     assert(!we_provider_lookup("doubao", &p));
     assert(!we_provider_lookup("", &p));
@@ -61,6 +66,41 @@ static void test_kimi_parse(void)
     printf("ok: kimi parse\n");
 }
 
+static void test_openrouter_parse(void)
+{
+    char amt[32];
+    // 官方示例:{"data":{"total_credits":100.5,"total_usage":25.75}} → 剩余 74.75
+    assert(we_provider_parse("openrouter",
+        "{\"data\":{\"total_credits\":100.5,\"total_usage\":25.75}}", amt, sizeof(amt)));
+    assert(strcmp(amt, "74.75") == 0);
+
+    // 整数补两位小数
+    assert(we_provider_parse("openrouter",
+        "{\"data\":{\"total_credits\":30,\"total_usage\":0}}", amt, sizeof(amt)));
+    assert(strcmp(amt, "30.00") == 0);
+
+    // 小数减法(注意:二进制浮点在半美分边界可能差 0.01,余额显示可接受)
+    assert(we_provider_parse("openrouter",
+        "{\"data\":{\"total_credits\":10,\"total_usage\":0.25}}", amt, sizeof(amt)));
+    assert(strcmp(amt, "9.75") == 0);
+    assert(we_provider_parse("openrouter",
+        "{\"data\":{\"total_credits\":0.01,\"total_usage\":0}}", amt, sizeof(amt)));
+    assert(strcmp(amt, "0.01") == 0);
+
+    // 用到只剩 0:显示 0.00
+    assert(we_provider_parse("openrouter",
+        "{\"data\":{\"total_credits\":12.34,\"total_usage\":12.34}}", amt, sizeof(amt)));
+    assert(strcmp(amt, "0.00") == 0);
+
+    // 缺任一字段 = 解析失败(比如 403 的 error 响应)
+    assert(!we_provider_parse("openrouter",
+        "{\"error\":{\"code\":403,\"message\":\"Only management keys\"}}", amt, sizeof(amt)));
+    assert(!we_provider_parse("openrouter",
+        "{\"data\":{\"total_credits\":100.5}}", amt, sizeof(amt)));
+    assert(!we_provider_parse("openrouter", "{}", amt, sizeof(amt)));
+    printf("ok: openrouter parse\n");
+}
+
 static void test_unsupported(void)
 {
     char amt[32];
@@ -74,6 +114,7 @@ int main(void)
     test_lookup();
     test_deepseek_parse();
     test_kimi_parse();
+    test_openrouter_parse();
     test_unsupported();
     printf("ALL PASS\n");
     return 0;
