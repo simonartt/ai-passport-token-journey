@@ -33,6 +33,17 @@
 - host 测试:新增 `tests/test_we_diag.c`(错误/状态短码映射、快照往返、超长串截断、极小缓冲与空指针),
   `tests/test_we_cfg.c` 补上 Key 清洗与"增量更新 Key"的用例;`tools/validate.sh` 会跑新套件。
 
+- 修掉诊断本身的一个 bug(v1.1.3):`esp_http_client_get_and_clear_last_tls_error()` 的**返回值**
+  才是 esp-tls 的分类码(`0x8000` 段,说明断在哪一层),之前把它当成"成功/失败标志",非零时反而把
+  出参清零——真失败时 `/diag` 的 `tls_code` 恒为 0,诊断页在最需要它的时候恰好是瞎的。现在分类码
+  存进 `we_diag_row_t.tls_err`,屏幕短码由 `we_diag_tag_from_pair()` 在两个错误码里挑更有信息量的
+  那个(分类码优先于笼统的 `ESP_ERR_HTTP_CONNECT 0x7002`)。同时新增**独立网络自检**:整轮取数
+  全失败后,用 `esp_tls` 的 `is_plain_tcp` 只做 DNS+TCP 重跑同一条连接路径(不握手、不申请大缓冲,
+  也是一次内存低压探测),用自持的错误句柄把 `0x8001`(域名没解析)/`0x8004`(TCP 连不上)/
+  `0x8006`(超时)和 socket errno(111 被拒 / 110 超时 / 101 无路由 / 113 主机不可达 / 104 被重置)
+  分开,并快照本机 IP、网关与 DHCP 下发的 DNS,一并打印进 `/diag` 的"网络自检"段——`0x7002` 这个
+  兜底码终于说得出人话。
+
 ## 2026-09-05
 
 - **feature/community-skeleton**:Token 余额玩法社区版——SoftAP 配置门户(`we_portal`)、配置模型(`we_cfg`)、平台适配层(`we_provider`,DeepSeek/Kimi HTTPS 直连余额)、动态平台行、锁屏签名昵称化;新增 `we_cfg`/`we_provider` host 测试。
