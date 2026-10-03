@@ -68,7 +68,7 @@ typedef struct {
 // 整次刷新的诊断快照
 typedef struct {
     uint32_t seq;                     // 第几次刷新(进程内自增,从 1 开始)
-    char     stage[WE_DIAG_STAGE_MAX];// 卡在哪一步:CONFIG/WIFI/SNTP/FETCH/RETRY/PROBE/DONE/FAIL/CANCEL
+    char     stage[WE_DIAG_STAGE_MAX];// 卡在哪一步:CONFIG/WIFI/SNTP/RATE/FETCH/RETRY/PROBE/DONE/FAIL/CANCEL
     bool     clock_ok;                // 取数时系统时间是否已校时(>= 2023-11)
     int      wifi_rc;                 // 0 = 已连上;其余为 wifi_connect_once 的错误码
     int      n_ok;                    // 成功平台数
@@ -76,6 +76,8 @@ typedef struct {
     uint32_t free_heap;               // 取数前的空闲堆
     uint32_t min_free_heap;           // 历史最小空闲堆(含 TLS 握手峰值)
     uint32_t largest_block;           // 最大连续可分配块(TLS 握手最吃这个)
+    int      rate_milli;              // 本次折算用的美元汇率 ×1000(0 = 本轮没用到)
+    char     rate_src[8];             // live / cache / default
     we_diag_net_t net;
     we_diag_row_t row[WE_DIAG_ROWS];
 } we_diag_t;
@@ -92,6 +94,9 @@ void we_diag_set_env(int wifi_rc, bool clock_ok, uint32_t free_heap,
 
 // 记录网络探测结果(probed = false 时忽略)
 void we_diag_set_net(const we_diag_net_t *net);
+
+// 记录本轮折算用的汇率(milli = USD/CNY ×1000)与来源("live"/"cache"/"default")
+void we_diag_set_rate(int milli, const char *src);
 
 // 用自检得到的确定结论细化第 idx 行的短码。
 // 只在"esp_tls 没记下具体原因(tls_err == 0)且当前短码就是笼统的连接失败(CONN)"

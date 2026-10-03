@@ -31,6 +31,7 @@
 #include "we_hist.h"       // 逐日记账数据模型(NVS 存取;门户备份模块共用)
 #include "we_provider.h"   // 平台适配:直连官方余额接口
 #include "we_portal.h"     // we_cfg_load / we_cfg_save(NVS 存取)
+#include "we_set.h"        // 用户可选项(自动刷新档位 → 毫秒换算)
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -95,19 +96,95 @@ static const char *TAG = "balance";
 #define BAT_PILL_J_Y 11
 #define BAT_PILL_J_W 50
 #define BAT_PILL_J_H 19
-#define BAT_PILL_B_X 184
-#define BAT_PILL_B_Y 8
+#define BAT_PILL_B_X 174
+#define BAT_PILL_B_Y 11
 #define BAT_PILL_B_W 50
-#define BAT_PILL_B_H 22
-// 主页图例:4 个色块等距居中,LOW/HIGH 两端文字各自定位
-#define LEGEND_SQ_X0   66          // 首块左缘
-#define LEGEND_SQ_Y    283
-#define LEGEND_SQ_S    12          // 块边长
-#define LEGEND_SQ_GAP  32          // 块间距(横向)
-#define LEGEND_LO_X    194         // "LOW"字左缘
-#define LEGEND_LO_Y    283
-#define LEGEND_HI_X    15          // "HIGH"字左缘
-#define LEGEND_HI_Y    283
+#define BAT_PILL_B_H 19
+// 主页(TOKEN JOURNEY)标题/发丝线/摘要卡
+#define TITLE_J_X    14
+#define TITLE_J_Y    11
+#define TITLE_J_W    130
+#define TITLE_J_H    19
+#define HAIR_J_X     8
+#define HAIR_J_Y     39
+#define HAIR_J_W     224
+#define HAIR_J_H     1
+#define SUM_CARD_X   14
+#define SUM_CARD_Y   48
+#define SUM_CARD_W   212
+#define SUM_CARD_H   36
+#define SUM_CAP_X    30           // "30 DAYS" 标题(绝对坐标;卡内相对 = 减 SUM_CARD_XY)
+#define SUM_CAP_Y    57
+#define SUM_CAP_W    70
+#define SUM_CAP_H    19
+#define HEAT_SUM_X   142          // 使用天数大字
+#define HEAT_SUM_Y   57
+#define HEAT_SUM_W   70
+#define HEAT_SUM_H   19
+// 热力图:单格 + 整区(格区由 HEAT_CELL 按 6×5 + 间距 6 铺满 HEAT_GRID)
+#define HEAT_CELL_X  15
+#define HEAT_CELL_Y  96
+#define HEAT_CELL_W  30
+#define HEAT_CELL_H  30
+#define HEAT_GRID_X  15
+#define HEAT_GRID_Y  96
+#define HEAT_GRID_W  210
+#define HEAT_GRID_H  174
+#define HEAT_TODAY_X 195          // 今天 = 右下角格(第 6 列第 5 行)
+#define HEAT_TODAY_Y 240
+#define HEAT_TODAY_W 30
+#define HEAT_TODAY_H 30
+// 图例:LOW/HIGH 两端文字 + 4 个色块(低→高:淡紫→深紫)
+#define LEGEND_LO_X  194
+#define LEGEND_LO_Y  283
+#define LEGEND_LO_W  30
+#define LEGEND_LO_H  17
+#define LEGEND_SQ1_X 66
+#define LEGEND_SQ1_Y 286
+#define LEGEND_SQ1_W 12
+#define LEGEND_SQ1_H 12
+#define LEGEND_SQ2_X 98
+#define LEGEND_SQ2_Y 286
+#define LEGEND_SQ2_W 12
+#define LEGEND_SQ2_H 12
+#define LEGEND_SQ3_X 130
+#define LEGEND_SQ3_Y 286
+#define LEGEND_SQ3_W 12
+#define LEGEND_SQ3_H 12
+#define LEGEND_SQ4_X 162
+#define LEGEND_SQ4_Y 286
+#define LEGEND_SQ4_W 12
+#define LEGEND_SQ4_H 12
+#define LEGEND_HI_X  15
+#define LEGEND_HI_Y  283
+#define LEGEND_HI_W  30
+#define LEGEND_HI_H  17
+// 底部翻页点
+#define PAGE_DOT1_X  114
+#define PAGE_DOT1_Y  304
+#define PAGE_DOT1_W  6
+#define PAGE_DOT1_H  6
+#define PAGE_DOT2_X  126
+#define PAGE_DOT2_Y  304
+#define PAGE_DOT2_W  6
+#define PAGE_DOT2_H  6
+
+// 宏表与派生几何必须自洽(布局编辑器回写时只动宏,公式不动;对不上就编译期炸)
+_Static_assert(HEAT_CELL_X == HEAT_X0 && HEAT_CELL_Y == HEAT_Y0 &&
+               HEAT_CELL_W == HEAT_S && HEAT_CELL_H == HEAT_S, "heat cell mismatch");
+_Static_assert(HEAT_GRID_X == HEAT_X0 && HEAT_GRID_Y == HEAT_Y0 &&
+               HEAT_GRID_W == HEAT_COLS * HEAT_S + (HEAT_COLS - 1) * HEAT_G &&
+               HEAT_GRID_H == HEAT_ROWS * HEAT_S + (HEAT_ROWS - 1) * HEAT_G, "heat grid mismatch");
+_Static_assert(HEAT_TODAY_X == HEAT_X0 + (HEAT_COLS - 1) * (HEAT_S + HEAT_G) &&
+               HEAT_TODAY_Y == HEAT_Y0 + (HEAT_ROWS - 1) * (HEAT_S + HEAT_G), "heat today mismatch");
+_Static_assert(LEGEND_SQ1_W == 12 && LEGEND_SQ1_H == 12 &&
+               LEGEND_SQ2_X - LEGEND_SQ1_X == 32 &&
+               LEGEND_SQ3_X - LEGEND_SQ2_X == 32 &&
+               LEGEND_SQ4_X - LEGEND_SQ3_X == 32, "legend squares spacing");
+_Static_assert(LEGEND_SQ1_Y == LEGEND_SQ2_Y && LEGEND_SQ2_Y == LEGEND_SQ3_Y &&
+               LEGEND_SQ3_Y == LEGEND_SQ4_Y && LEGEND_LO_Y == LEGEND_HI_Y &&
+               LEGEND_SQ1_Y == 286, "legend rows aligned");
+_Static_assert(PAGE_DOT2_X - PAGE_DOT1_X == 12 && PAGE_DOT1_Y == 304, "page dots");
 
 // ---- 深色 AI 风配色 ----
 #define C_BG0      0x141B33   // 顶部稍亮的深空蓝
@@ -214,8 +291,14 @@ static bool  s_creds_ok;
 static bool  s_data_ok;       // 最近一次刷新是否成功
 static uint32_t s_last_try;   // 最近一次刷新尝试时刻
 #define RETRY_OFFLINE_MS 90000   // 离线:90s 自动重试
-#define RETRY_FRESH_MS   600000  // 在线:10 分钟自动刷新
 static lv_timer_t *s_retry_timer;
+// 自动刷新间隔(ms);0 = 用户关闭定时刷新(离线重试与手动 OK 刷新不受影响)。
+// 值来自 NVS(ns=cfg key=refmin,存分钟),进页面时 auto_refresh_load();没设过 = 60 分钟。
+static uint32_t s_auto_ms;
+
+// 本文件写 NVS 的命名空间(与门户配置 we_cfg 共用 "cfg",key 各不相同:
+// usdcny=汇率缓存、refmin=自动刷新档位)。放在两个使用点之前。
+#define CFG_NS "cfg"
 
 static void refresh_start(void);
 static bool cfg_load_local(void);          // 定义见 NVS 凭据节
@@ -239,7 +322,7 @@ static lv_obj_t *obj_new(lv_obj_t *parent, int x, int y, int w, int h, uint32_t 
 static void bg_build(lv_obj_t *scr)
 {
     obj_new(scr, 0, 0, 240, 320, C_BG2);
-    obj_new(scr, 8, 39, 224, 1, C_HAIR);           // 标题下细分隔线
+    obj_new(scr, HAIR_J_X, HAIR_J_Y, HAIR_J_W, HAIR_J_H, C_HAIR);   // 标题下细分隔线
 }
 
 static void dot_set(int idx, uint32_t color)
@@ -382,7 +465,7 @@ static void journey_ui_build(void)
     lv_obj_t *title = lv_label_create(s_jcont);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(C_TXT), 0);
-    lv_obj_set_pos(title, 14, 11);
+    lv_obj_set_pos(title, TITLE_J_X, TITLE_J_Y);
     lv_label_set_text(title, "TOKEN JOURNEY");
     s_bats[PAGE_JOURNEY] = bat_pill_create(s_jcont, BAT_PILL_J_X, BAT_PILL_J_Y,
                                            BAT_PILL_J_W, BAT_PILL_J_H);
@@ -390,8 +473,8 @@ static void journey_ui_build(void)
     // 摘要卡:左「30 DAYS」+ 右侧使用天数大字(同字号,卡加高下边框下移)
     lv_obj_t *sum = lv_obj_create(s_jcont);
     lv_obj_remove_flag(sum, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(sum, 14, 48);
-    lv_obj_set_size(sum, 212, 36);
+    lv_obj_set_pos(sum, SUM_CARD_X, SUM_CARD_Y);
+    lv_obj_set_size(sum, SUM_CARD_W, SUM_CARD_H);
     lv_obj_set_style_radius(sum, 10, 0);
     lv_obj_set_style_pad_all(sum, 0, 0);
     lv_obj_set_style_border_width(sum, 1, 0);
@@ -400,14 +483,16 @@ static void journey_ui_build(void)
     lv_obj_t *sumcap = lv_label_create(sum);
     lv_obj_set_style_text_font(sumcap, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(sumcap, lv_color_hex(C_PURPLE), 0);
-    lv_obj_set_pos(sumcap, 16, 9);
+    lv_obj_set_pos(sumcap, SUM_CAP_X - SUM_CARD_X, SUM_CAP_Y - SUM_CARD_Y);
     lv_label_set_text(sumcap, "30 DAYS");
     s_heat_sum = lv_label_create(sum);
     lv_obj_set_style_text_font(s_heat_sum, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_heat_sum, lv_color_hex(C_TXT_HI), 0);
     lv_label_set_text(s_heat_sum, "--");
     lv_obj_update_layout(s_heat_sum);
-    lv_obj_set_pos(s_heat_sum, 212 - 14 - lv_obj_get_width(s_heat_sum), 9);
+    // 右对齐:让字右缘贴绝对坐标 HEAT_SUM_X+HEAT_SUM_W(=卡右缘),换算到卡内相对 x
+    lv_obj_set_pos(s_heat_sum, (HEAT_SUM_X + HEAT_SUM_W - SUM_CARD_X) - lv_obj_get_width(s_heat_sum),
+                   SUM_CAP_Y - SUM_CARD_Y);
 
     // 热力图 30 格(6 列 × 5 行,旧→新,左上→右下):先全画暗槽
     for (int i = 0; i < HEAT_N; i++) {
@@ -427,16 +512,19 @@ static void journey_ui_build(void)
     }
 
     // 图例:4 个正方形色块等距居中,两端文字位置由 LEGEND_LO_* / LEGEND_HI_* 决定
-    // 垂直:处于热力格底(264)与翻页点(304)正中
+    // 垂直:色块(12px)在 286,与 283 起 17px 高的 LOW/HIGH 文字视觉居中
     static const uint32_t lg[4] = { HEAT_LV1, HEAT_LV2, HEAT_LV3, HEAT_LV4 };
+    static const int sq_x[4] = { LEGEND_SQ1_X, LEGEND_SQ2_X, LEGEND_SQ3_X, LEGEND_SQ4_X };
+    static const int sq_y[4] = { LEGEND_SQ1_Y, LEGEND_SQ2_Y, LEGEND_SQ3_Y, LEGEND_SQ4_Y };
+    static const int sq_w[4] = { LEGEND_SQ1_W, LEGEND_SQ2_W, LEGEND_SQ3_W, LEGEND_SQ4_W };
+    static const int sq_h[4] = { LEGEND_SQ1_H, LEGEND_SQ2_H, LEGEND_SQ3_H, LEGEND_SQ4_H };
     lv_obj_t *hi = lv_label_create(s_jcont);
     lv_obj_set_style_text_font(hi, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(hi, lv_color_hex(C_TXT_FAINT), 0);
     lv_label_set_text(hi, "HIGH");
     lv_obj_set_pos(hi, LEGEND_HI_X, LEGEND_HI_Y);
     for (int i = 0; i < 4; i++) {
-        lv_obj_t *b = obj_new(s_jcont, LEGEND_SQ_X0 + i * LEGEND_SQ_GAP, LEGEND_SQ_Y,
-                              LEGEND_SQ_S, LEGEND_SQ_S, lg[i]);
+        lv_obj_t *b = obj_new(s_jcont, sq_x[i], sq_y[i], sq_w[i], sq_h[i], lg[i]);
         lv_obj_set_style_radius(b, 2, 0);
         s_legend[i] = b;
     }
@@ -609,7 +697,10 @@ static void ui_build(void)
 
     // 底部翻页点(全局,不随页动):2 点近距居中,当前页紫、另一页暗紫
     for (int i = 0; i < 2; i++) {
-        lv_obj_t *d = obj_new(s_scr, 114 + i * 12, 304, 6, 6, 0x3A2E6E);
+        lv_obj_t *d = obj_new(s_scr, i == 0 ? PAGE_DOT1_X : PAGE_DOT2_X,
+                              i == 0 ? PAGE_DOT1_Y : PAGE_DOT2_Y,
+                              i == 0 ? PAGE_DOT1_W : PAGE_DOT2_W,
+                              i == 0 ? PAGE_DOT1_H : PAGE_DOT2_H, 0x3A2E6E);
         lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
         s_pgdot[i] = d;
     }
@@ -660,7 +751,9 @@ static void heat_sum_set(const char *txt)
     if (!s_heat_sum) return;
     lv_label_set_text(s_heat_sum, txt);
     lv_obj_update_layout(s_heat_sum);
-    lv_obj_set_pos(s_heat_sum, 212 - 14 - lv_obj_get_width(s_heat_sum), 9);
+    // 右缘贴卡内 (HEAT_SUM_X+HEAT_SUM_W-SUM_CARD_X) 处(=卡右缘,与建卡时的初始定位同源)
+    lv_obj_set_pos(s_heat_sum, (HEAT_SUM_X + HEAT_SUM_W - SUM_CARD_X) - lv_obj_get_width(s_heat_sum),
+                   SUM_CAP_Y - SUM_CARD_Y);
 }
 
 // 用 usage[30] 重绘主页:使用天数 + 30 格分档着色(紫系深浅),今天格粉框
@@ -810,14 +903,34 @@ static void dim_tick(lv_timer_t *timer)
     bsp_display_backlight(s_bl);
 }
 
-// 60s 心跳:离线 90s 自动重试 / 在线 10 分钟自动刷新(锁屏或忙碌时跳过)
+// 自动刷新档位读入:NVS ns=cfg key=refmin(u8 分钟)。没写过/非法 → 默认 60 分钟。
+// (0 是合法值 = 用户主动关闭,和"没写过"区分开:没写过时 nvs_get_u8 返回 NOT_FOUND。)
+// 与汇率缓存共用 cfg 命名空间(CFG_NS),两个 key 各存各的,互不影响。
+#define AUTO_NVS_KEY "refmin"
+static void auto_refresh_load(void)
+{
+    uint32_t ms = we_set_auto_min_ms(WE_SET_AUTO_60);   // 出厂默认
+    nvs_handle_t h;
+    if (nvs_open(CFG_NS, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t m = 0;
+        if (nvs_get_u8(h, AUTO_NVS_KEY, &m) == ESP_OK && we_set_auto_min_valid(m))
+            ms = we_set_auto_min_ms(m);
+        nvs_close(h);
+    }
+    s_auto_ms = ms;
+    ESP_LOGI(TAG, "自动刷新:%s", ms ? "" : "关");
+    if (ms) ESP_LOGI(TAG, "  每 %lu 分钟", (unsigned long)(ms / 60000));
+}
+
+// 60s 心跳:离线 90s 自动重试 / 在线按用户档位(默认 10min)自动刷新(锁屏或忙碌时跳过)
 static void retry_cb(lv_timer_t *timer)
 {
     (void)timer;
     if (!s_scr || s_locked || s_busy) return;
     uint32_t ago = lv_tick_get() - s_last_try;
     if (s_data_ok) {
-        if (ago >= RETRY_FRESH_MS) refresh_start();
+        // s_auto_ms=0 表示用户关了定时刷新:在线态不再自动刷,只剩离线重试
+        if (s_auto_ms != 0 && ago >= s_auto_ms) refresh_start();
     } else {
         if (ago >= RETRY_OFFLINE_MS) refresh_start();
     }
@@ -853,9 +966,10 @@ void demo_balance_enter(void)
     bsp_display_backlight(s_bl);
     s_idle_timer = lv_timer_create(dim_tick, 250, NULL);
 
-    // 自动找网心跳(离线 90s 重试 / 在线 10min 刷新)
+    // 自动找网心跳(离线 90s 重试 / 在线按档位定时刷新)
     s_data_ok = false;
     s_last_try = 0;
+    auto_refresh_load();                 // 档位从 NVS 读(没设过 = 默认 60 分钟)
     s_retry_timer = lv_timer_create(retry_cb, 60000, NULL);
 
     refresh_start();
@@ -1099,6 +1213,102 @@ static void net_probe(we_diag_net_t *np, const char *host)
     }
     esp_tls_conn_destroy(tls);
     if (r > 0) np->rc = 0;                         // 连上了:清掉任何残留码
+}
+
+// ---------------------------------------------------------------- 美元→人民币折算
+// OpenRouter 等美元平台的余额,取回后统一折成人民币再进显示/记账,
+// 这样总余额、今日花费、30 天热力都是同一币种,可直接相加比较。
+//
+// 汇率来源三级回退,取到即写 NVS 缓存(ns=cfg key=usdcny,u32 = 汇率×1000):
+//   1) 在线:frankfurter.dev(响应 70B)→ open.er-api.com(响应 ~3KB)
+//   2) NVS 缓存(上次成功取到的值)
+//   3) 兜底常量 6.800(汇率多年在 6.3~7.3 区间,量级不会错)
+// 折算只影响"美元平台"的数值;记账基线也存折算后的人民币,所以平台余额不变、
+// 只有汇率波动时,当日"花费"会出现 余额×汇率变化 量级的微小伪差(美分级别),
+// 这是单币种记账模型的固有代价,换取三平台可直接合计,值得。
+#define RATE_KEY       "usdcny"          // u32:USD/CNY × 1000(命名空间用 CFG_NS)
+#define RATE_DEFAULT   6.800             // 最后兜底
+#define RATE_LIVE_MAX  2                 // 两个在线源
+
+static const char *RATE_URLS[RATE_LIVE_MAX] = {
+    "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY",
+    "https://open.er-api.com/v6/latest/USD",
+};
+
+// 已配置平台里是否有美元计价平台(有才值得花一次请求取汇率)
+static bool any_usd_provider(const we_cfg_t *cfg)
+{
+    for (uint8_t i = 0; i < cfg->prov_count; i++) {
+        const we_provider_t *p = NULL;
+        if (we_provider_lookup(cfg->prov[i].provider_id, &p) && p &&
+            p->currency && strcmp(p->currency, "USD") == 0) return true;
+    }
+    return false;
+}
+
+static double rate_cache_read(void)     // 无缓存返回 -1
+{
+    nvs_handle_t h;
+    if (nvs_open(CFG_NS, NVS_READONLY, &h) != ESP_OK) return -1;
+    uint32_t milli = 0;
+    esp_err_t err = nvs_get_u32(h, RATE_KEY, &milli);
+    nvs_close(h);
+    if (err != ESP_OK || milli == 0) return -1;
+    return (double)milli / 1000.0;
+}
+
+static void rate_cache_write(double rate)
+{
+    if (rate <= 0) return;
+    nvs_handle_t h;
+    if (nvs_open(CFG_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    uint32_t milli = (uint32_t)(rate * 1000.0 + 0.5);
+    if (nvs_set_u32(h, RATE_KEY, milli) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+}
+
+// 必须在 Wi-Fi 已连接时调用。buf 复用取数响应缓冲(两个响应都 <4KB)。
+// 成功返回汇率并写缓存;两个源都失败返回 -1。
+static double fetch_usd_rate(char *buf, size_t cap)
+{
+    for (int i = 0; i < RATE_LIVE_MAX; i++) {
+        esp_http_client_config_t hcfg = {
+            .url = RATE_URLS[i],
+            .method = HTTP_METHOD_GET,
+            .timeout_ms = HTTP_TIMEOUT_MS,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .keep_alive_enable = false,
+        };
+        esp_http_client_handle_t cl = esp_http_client_init(&hcfg);
+        if (!cl) continue;
+        double rate = -1;
+        if (esp_http_client_open(cl, 0) == ESP_OK) {
+            esp_http_client_fetch_headers(cl);
+            if (esp_http_client_get_status_code(cl) == 200) {
+                size_t used = 0;
+                int r;
+                while (used + 1 < cap &&
+                       (r = esp_http_client_read(cl, buf + used, cap - used - 1)) > 0) {
+                    used += (size_t)r;
+                }
+                buf[used] = '\0';
+                if (!we_rate_parse(buf, &rate)) rate = -1;
+            }
+            esp_http_client_close(cl);
+        } else {
+            // 别让这个辅助请求的错误污染下一张平台卡的诊断快照:读完即清
+            int c = 0, f = 0;
+            (void)esp_http_client_get_and_clear_last_tls_error(cl, &c, &f);
+        }
+        esp_http_client_cleanup(cl);
+        if (rate > 0) {
+            rate_cache_write(rate);
+            ESP_LOGI(TAG, "汇率 %f ← %s", rate, RATE_URLS[i]);
+            return rate;
+        }
+        ESP_LOGW(TAG, "汇率源[%d] 失败", i);
+    }
+    return -1;
 }
 
 // dg 可为 NULL。失败时回填:open_err(0x7000 段)、tls_err(0x8000 段)、mbedTLS 码、
@@ -1466,6 +1676,30 @@ static void balance_worker(void *arg)
     int   n_ok = 0;
     double total = 0;
 
+    // 美元平台存在 → 先把汇率备好(在线 → NVS 缓存 → 兜底常量)。
+    // 之后所有金额(显示/记账/热力)统一按人民币处理,下游不再区分币种。
+    double usdcny = 0;
+    if (any_usd_provider(&s_cfg)) {
+        static char rbuf[RESP_MAX];
+        we_diag_set_stage("RATE");
+        double live = s_cancel ? -1 : fetch_usd_rate(rbuf, sizeof(rbuf));
+        if (live > 0) {
+            usdcny = live;
+            we_diag_set_rate((int)(live * 1000.0 + 0.5), "live");
+        } else {
+            double cached = rate_cache_read();
+            if (cached > 0) {
+                usdcny = cached;
+                we_diag_set_rate((int)(cached * 1000.0 + 0.5), "cache");
+            } else {
+                usdcny = RATE_DEFAULT;
+                we_diag_set_rate((int)(RATE_DEFAULT * 1000.0 + 0.5), "default");
+            }
+            ESP_LOGW(TAG, "汇率走 %s 路径: %f", cached > 0 ? "缓存" : "兜底", usdcny);
+        }
+        we_diag_set_stage("FETCH");
+    }
+
     if (!s_cancel) {
         bsp_lvgl_lock(1000);
         for (int i = 0; i < n; i++) { dot_set(i, C_DOT_GRAY); amount_set(i, "--"); }
@@ -1505,7 +1739,10 @@ static void balance_worker(void *arg)
                 if (gotd > 0) {
                     char amt[24];
                     ok = we_provider_parse(prov->id, dresp, amt, sizeof(amt));
-                    if (ok) v = strtod(amt, NULL);
+                    if (ok) {
+                        // 折成人民币:美元 × 汇率,其余原样。下游(显示/记账/热力)只见 CNY
+                        v = we_provider_to_cny(prov->currency, strtod(amt, NULL), usdcny);
+                    }
                 }
                 // 打开成功才用状态码/解析结果定码;打开失败时上面已填好 DNS/TLS/CONN
                 if (dr.open_err == 0)

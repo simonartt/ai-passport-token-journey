@@ -52,6 +52,12 @@ void we_diag_set_net(const we_diag_net_t *net)
     s_diag.net.host[sizeof(s_diag.net.host) - 1]   = '\0';
 }
 
+void we_diag_set_rate(int milli, const char *src)
+{
+    s_diag.rate_milli = milli;
+    str_trunc(s_diag.rate_src, sizeof(s_diag.rate_src), src ? src : "");
+}
+
 void we_diag_refine_conn_tag(int idx, const char *tag)
 {
     if (idx < 0 || idx >= WE_DIAG_ROWS) return;

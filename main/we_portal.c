@@ -8,6 +8,7 @@
 #include "we_backup.h"    // 配置 + 历史整份导出/恢复(GET /backup、POST /restore)
 #include "we_cfg.h"
 #include "we_diag.h"      // 上一次余额刷新的诊断快照(GET /diag)
+#include "we_set.h"       // 自动刷新档位(表单下拉 → NVS ns=cfg key=refmin)
 
 #include "esp_app_desc.h"
 #include "esp_err.h"
@@ -273,6 +274,21 @@ static void send_prov_row(httpd_req_t *req, const we_cfg_t *cfg, const char *id,
     httpd_resp_sendstr_chunk(req, "</div>");
 }
 
+// 读当前自动刷新档位(分钟)。NVS ns=cfg key=refmin;没写过/非法 → 默认 60。
+#define AUTO_NVS_KEY "refmin"
+static uint8_t auto_min_read(void)
+{
+    uint8_t m = WE_SET_AUTO_60;
+    nvs_handle_t h;
+    if (nvs_open(CFG_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t got = 0;
+        if (nvs_get_u8(h, AUTO_NVS_KEY, &got) == ESP_OK && we_set_auto_min_valid(got))
+            m = got;
+        nvs_close(h);
+    }
+    return m;
+}
+
 static esp_err_t root_get(httpd_req_t *req)
 {
     if (!portal_auth_ok(req)) return portal_ask_auth(req);
@@ -317,6 +333,40 @@ static esp_err_t root_get(httpd_req_t *req)
     send_prov_row(req, &cfg, "deepseek", "DeepSeek", "key_deepseek", "del_deepseek");
     send_prov_row(req, &cfg, "kimi", "Kimi(Moonshot)", "key_kimi", "del_kimi");
     send_prov_row(req, &cfg, "openrouter", "OpenRouter(美元)", "key_openrouter", "del_openrouter");
+    // 自动刷新间隔:美元平台取回金额会先按在线汇率折成人民币,再与另外两家合计
+    {
+        uint8_t cur = auto_min_read();
+        httpd_resp_sendstr_chunk(req,
+            "<h2>自动刷新</h2>"
+            "<div class=\"row\"><label>定时取数间隔</label><select name=\"refmin\" "
+            "style=\"width:100%;background:#131c38;color:#e6ecff;border:1px solid #2e3f6b;"
+            "border-radius:6px;padding:10px;font-size:15px\">");
+        static const struct { uint8_t v; const char *t; } opts[] = {
+            { WE_SET_AUTO_OFF, "关闭(仅手动/离线自动重试)" },
+            { WE_SET_AUTO_30,  "每 30 分钟" },
+            { WE_SET_AUTO_60,  "每 60 分钟(默认)" },
+            { WE_SET_AUTO_120, "每 120 分钟" },
+            { WE_SET_AUTO_180, "每 180 分钟" },
+        };
+        for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
+            httpd_resp_sendstr_chunk(req, "<option value=\"");
+            char num[4];
+            int len = 0;
+            uint8_t v = opts[i].v;                 // 0~180 手写十进制,免引 snprintf 宽度问题
+            if (v >= 100) { num[len++] = (char)('0' + v / 100); v %= 100; }
+            if (v >= 10 || len > 0) { num[len++] = (char)('0' + v / 10); v %= 10; }
+            num[len++] = (char)('0' + v);
+            num[len] = '\0';
+            httpd_resp_sendstr_chunk(req, num);
+            httpd_resp_sendstr_chunk(req, "\"");
+            if (opts[i].v == cur) httpd_resp_sendstr_chunk(req, " selected");
+            httpd_resp_sendstr_chunk(req, ">");
+            httpd_resp_sendstr_chunk(req, opts[i].t);
+            httpd_resp_sendstr_chunk(req, "</option>");
+        }
+        httpd_resp_sendstr_chunk(req,
+            "</select><p class=\"hint\">刷新期间 Wi-Fi 会短暂开启;间隔越短越费电。</p></div>");
+    }
     httpd_resp_sendstr_chunk(req,
         "<h2>锁屏签名(可选,空=不显示)</h2>"
         "<div class=\"row\"><label>昵称</label><input name=\"nickname\" maxlength=\"23\" value=\"");
@@ -409,6 +459,19 @@ static esp_err_t save_post(httpd_req_t *req)
     }
     if (form_get(body, "nickname", v, sizeof(v)))
         text_copy(cfg.nickname, sizeof(cfg.nickname), v);
+
+    // 自动刷新档位:独立于 we_cfg blob,单存一个 u8(ns=cfg key=refmin)。
+    // 表单是 select,一定带值;非法值直接拒绝落盘。必须在 free(body) 前解析。
+    if (form_get(body, "refmin", v, sizeof(v))) {
+        uint8_t m = (uint8_t)atoi(v);
+        if (we_set_auto_min_valid(m)) {
+            nvs_handle_t h;
+            if (nvs_open(CFG_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+                if (nvs_set_u8(h, AUTO_NVS_KEY, m) == ESP_OK) nvs_commit(h);
+                nvs_close(h);
+            }
+        }
+    }
 
     free(body);
 
@@ -583,6 +646,12 @@ static esp_err_t diag_get(httpd_req_t *req)
                   (unsigned long)snap.largest_block);
     }
     diag_line(req, "portal   : mode=%d  ip=%s", (int)s_mode, s_ip[0] ? s_ip : "(none)");
+    if (snap.rate_milli) {
+        diag_line(req, "rate     : USD/CNY=%d.%03d  来源=%s"
+                       "  (美元平台余额按此折算成人民币后合计)",
+                  snap.rate_milli / 1000, snap.rate_milli % 1000,
+                  snap.rate_src[0] ? snap.rate_src : "?");
+    }
 
     // 网络自检:整轮取数全失败时跑的那一次独立探测。open_err 的 0x7002
     // (ESP_ERR_HTTP_CONNECT)只说"连接阶段失败",哪一层断的要看这一节。
@@ -608,7 +677,7 @@ static esp_err_t diag_get(httpd_req_t *req)
         diag_line(req, "           errno 111=被拒 110=超时 101=无路由 113=主机不可达 104=被重置");
     }
     diag_line(req, "");
-    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/FETCH/RETRY/PROBE/DONE/FAIL/CANCEL");
+    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/RATE/FETCH/RETRY/PROBE/DONE/FAIL/CANCEL");
     diag_line(req, "tag 含义: DNS=域名没解析出来  CONN=连不上主机  TOUT=连接超时");
     diag_line(req, "          TLS/TLSTO=握手失败  X509=证书解析失败  SOCK/PROTO=建连失败");
     diag_line(req, "          CERT=证书链被拒(多半是缺时间或 CA)  SETOPT=套接字选项失败");

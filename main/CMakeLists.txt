@@ -6,6 +6,7 @@ idf_component_register(
          "we_diag.c"
          "we_portal.c"
          "we_provider.c"
+         "we_set.c"
          "ui_pixel.c"
          "ui_pixel_math.c"
          "demo_display.c"

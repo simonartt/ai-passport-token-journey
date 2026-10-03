@@ -26,6 +26,12 @@ static void test_lookup(void)
     assert(strcmp(p->host, "openrouter.ai") == 0);
     assert(strlen(p->host) < WE_DIAG_HOST_MAX);
     assert(strstr(p->url, p->host) != NULL);
+    // 币种标签:美元平台靠它决定要不要折算
+    assert(strcmp(p->currency, "USD") == 0);
+    assert(we_provider_lookup("deepseek", &p));
+    assert(strcmp(p->currency, "CNY") == 0);
+    assert(we_provider_lookup("kimi", &p));
+    assert(strcmp(p->currency, "CNY") == 0);
     assert(!we_provider_lookup("openai", &p));
     assert(!we_provider_lookup("doubao", &p));
     assert(!we_provider_lookup("", &p));
@@ -109,6 +115,41 @@ static void test_unsupported(void)
     printf("ok: unsupported\n");
 }
 
+static void test_rate_parse(void)
+{
+    double r = 0;
+    // frankfurter.dev 形态
+    assert(we_rate_parse("{\"amount\":1.0,\"base\":\"USD\",\"date\":\"2026-10-02\","
+                         "\"rates\":{\"CNY\":6.7046}}", &r));
+    assert(r > 6.70 && r < 6.71);
+    // er-api.com 形态(rates 里夹一大串其它币种,CNY 在中间)
+    assert(we_rate_parse("{\"result\":\"success\",\"rates\":"
+                         "{\"USD\":1,\"EUR\":0.9,\"CNY\":6.714383,\"JPY\":146.0}}", &r));
+    assert(r > 6.71 && r < 6.72);
+    // 出界拒绝(4.0~12.0):防抓错字段/脏数据
+    assert(!we_rate_parse("{\"rates\":{\"CNY\":1756789012}}", &r));   // 时间戳级
+    assert(!we_rate_parse("{\"rates\":{\"CNY\":0.5}}", &r));
+    assert(!we_rate_parse("{\"rates\":{\"CNY\":13.5}}", &r));
+    // 没有 CNY / 非数字 / 空
+    assert(!we_rate_parse("{\"rates\":{\"EUR\":0.9}}", &r));
+    assert(!we_rate_parse("{\"rates\":{\"CNY\":\"abc\"}}", &r));
+    assert(!we_rate_parse("{}", &r));
+    assert(!we_rate_parse(NULL, &r));
+    printf("ok: rate parse\n");
+}
+
+static void test_to_cny(void)
+{
+    // CNY 原样;USD 乘汇率;未知/空原样;没汇率(rate<=0)不折
+    assert(we_provider_to_cny("CNY", 146.09, 6.7) == 146.09);
+    double v = we_provider_to_cny("USD", 10.0, 6.7);
+    assert(v > 66.9 && v < 67.1);
+    assert(we_provider_to_cny("USD", 10.0, 0) == 10.0);      // 没汇率:宁可标价不折
+    assert(we_provider_to_cny("GBP", 10.0, 6.7) == 10.0);    // 未知币种原样
+    assert(we_provider_to_cny(NULL, 10.0, 6.7) == 10.0);
+    printf("ok: to_cny\n");
+}
+
 int main(void)
 {
     test_lookup();
@@ -116,6 +157,8 @@ int main(void)
     test_kimi_parse();
     test_openrouter_parse();
     test_unsupported();
+    test_rate_parse();
+    test_to_cny();
     printf("ALL PASS\n");
     return 0;
 }

@@ -104,9 +104,9 @@ static bool parse_openrouter(const char *body, char *amount, size_t cap)
 // 注:目前余额页/记账结构只有 3 行卡槽,表里最多放 3 个平台;加第 4 个前
 // 要先把 HIST_ROWS/WE_DIAG_ROWS/余额页布局一起扩到 4(动 NVS 记账 blob,需迁移)。
 static const we_provider_t PROVIDERS[] = {
-    { "deepseek",   "DeepSeek",        "https://api.deepseek.com/user/balance",       "api.deepseek.com" },
-    { "kimi",       "Kimi",            "https://api.moonshot.cn/v1/users/me/balance", "api.moonshot.cn"  },
-    { "openrouter", "OpenRouter",      "https://openrouter.ai/api/v1/credits",        "openrouter.ai"    },
+    { "deepseek",   "DeepSeek",        "https://api.deepseek.com/user/balance",       "api.deepseek.com", "CNY" },
+    { "kimi",       "Kimi",            "https://api.moonshot.cn/v1/users/me/balance", "api.moonshot.cn",  "CNY" },
+    { "openrouter", "OpenRouter",      "https://openrouter.ai/api/v1/credits",        "openrouter.ai",    "USD" },
 };
 
 bool we_provider_lookup(const char *id, const we_provider_t **out)
@@ -128,4 +128,33 @@ bool we_provider_parse(const char *id, const char *body, char *amount, size_t ca
     if (strcmp(id, "kimi") == 0) return parse_kimi(body, amount, cap);
     if (strcmp(id, "openrouter") == 0) return parse_openrouter(body, amount, cap);
     return false;
+}
+
+// ---------------------------------------------------------------- 汇率解析
+// frankfurter.dev: {"amount":1.0,"base":"USD","date":"...","rates":{"CNY":6.7046}}
+// er-api.com     : {"result":"success","rates":{"USD":1,...,"CNY":6.7143},...}
+// 两家的公共形态都是 "rates" 对象里的 "CNY":数字,直接复用 json_field。
+// 数值合理区间 4.0~12.0:明显出界的(比如误抓到 time_last_update 的秒级时间戳)
+// 一律拒绝,宁可回退缓存/兜底值,也不要把 6 位数当汇率乘上去。
+bool we_rate_parse(const char *body, double *out)
+{
+    if (!body || !out) return false;
+    char num[24];
+    if (!json_field(body, "CNY", num, sizeof(num))) return false;
+    char *end = NULL;
+    double v = strtod(num, &end);
+    if (end == num || *end != '\0') return false;      // 整段必须是纯数字
+    if (v < 4.0 || v > 12.0) return false;
+    *out = v;
+    return true;
+}
+
+double we_provider_to_cny(const char *currency, double amount, double usd_cny_rate)
+{
+    if (!currency) return amount;
+    if (strcmp(currency, "USD") == 0) {
+        if (usd_cny_rate > 0.0) return amount * usd_cny_rate;
+        return amount;            // 没拿到汇率:宁可标价不折,也不瞎乘
+    }
+    return amount;                // CNY 与未知币种一律原样
 }
