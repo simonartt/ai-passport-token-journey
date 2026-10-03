@@ -4,6 +4,7 @@ idf_component_register(
          "we_backup.c"
          "we_cfg.c"
          "we_diag.c"
+         "we_hermes.c"
          "we_portal.c"
          "we_provider.c"
          "we_set.c"

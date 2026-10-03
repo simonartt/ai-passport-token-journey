@@ -289,6 +289,39 @@ static uint8_t auto_min_read(void)
     return m;
 }
 
+// Hermes 网关配置(NVS ns=cfg 的三条字符串:hbase/huser/hpass)。
+// 密码语义与 WiFi 密码一致:表单留空 = 保持已存值不变。
+#define HM_KEY_BASE  "hbase"
+#define HM_KEY_USER  "huser"
+#define HM_KEY_PASS  "hpass"
+static void hm_read_str(nvs_handle_t h, const char *key, char *out, size_t cap)
+{
+    out[0] = '\0';
+    size_t len = cap;
+    if (nvs_get_str(h, key, out, &len) != ESP_OK) out[0] = '\0';
+}
+static void hermes_cfg_read(char *base, size_t bc, char *user, size_t uc)
+{
+    base[0] = user[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(CFG_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    hm_read_str(h, HM_KEY_BASE, base, bc);
+    hm_read_str(h, HM_KEY_USER, user, uc);
+    nvs_close(h);
+}
+static void hermes_cfg_save(const char *base, const char *user, const char *pass)
+{
+    nvs_handle_t h;
+    if (nvs_open(CFG_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (base[0]) nvs_set_str(h, HM_KEY_BASE, base);
+    else         nvs_erase_key(h, HM_KEY_BASE);
+    if (user[0]) nvs_set_str(h, HM_KEY_USER, user);
+    else         nvs_erase_key(h, HM_KEY_USER);
+    if (pass[0]) nvs_set_str(h, HM_KEY_PASS, pass);   // 留空 = 不改
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 static esp_err_t root_get(httpd_req_t *req)
 {
     if (!portal_auth_ok(req)) return portal_ask_auth(req);
@@ -366,6 +399,23 @@ static esp_err_t root_get(httpd_req_t *req)
         }
         httpd_resp_sendstr_chunk(req,
             "</select><p class=\"hint\">刷新期间 Wi-Fi 会短暂开启;间隔越短越费电。</p></div>");
+    }
+    // Hermes 网关(可选):填了才会取 P3/P4 两页数据。密码留空=不改。
+    {
+        char hb[64] = "", hu[32] = "";
+        hermes_cfg_read(hb, sizeof(hb), hu, sizeof(hu));
+        httpd_resp_sendstr_chunk(req,
+            "<h2>Hermes 网关(可选 · 第三/四页数据源)</h2>"
+            "<p class=\"hint\">填了才会在看板里显示 HERMES 实绩页。设备与网关需在同一局域网。</p>"
+            "<div class=\"row\"><label>网关地址</label><input name=\"hbase\" maxlength=\"63\" placeholder=\"http://192.168.6.164:9119\" value=\"");
+        send_html_escaped(req, hb);
+        httpd_resp_sendstr_chunk(req,
+            "\"></div><div class=\"row\"><label>用户名</label><input name=\"huser\" maxlength=\"31\" value=\"");
+        send_html_escaped(req, hu);
+        httpd_resp_sendstr_chunk(req,
+            "\"></div><div class=\"row\"><label>密码</label>"
+            "<input type=\"password\" name=\"hpass\" maxlength=\"63\" autocomplete=\"new-password\">"
+            "<p class=\"hint\">留空 = 密码不变。设备用账号密码登录网关(内置 Dashboard 的会话 Cookie 认证)。</p></div>");
     }
     httpd_resp_sendstr_chunk(req,
         "<h2>锁屏签名(可选,空=不显示)</h2>"
@@ -471,6 +521,15 @@ static esp_err_t save_post(httpd_req_t *req)
                 nvs_close(h);
             }
         }
+    }
+
+    // Hermes 网关:三条字符串。base/user 留空 = 清空(关闭该页);pass 留空 = 不改。
+    {
+        char hb[64] = "", hu[32] = "", hp[64] = "";
+        if (!form_get(body, "hbase", hb, sizeof(hb))) hb[0] = '\0';
+        if (!form_get(body, "huser", hu, sizeof(hu))) hu[0] = '\0';
+        if (!form_get(body, "hpass", hp, sizeof(hp))) hp[0] = '\0';
+        hermes_cfg_save(hb, hu, hp);
     }
 
     free(body);
@@ -677,7 +736,7 @@ static esp_err_t diag_get(httpd_req_t *req)
         diag_line(req, "           errno 111=被拒 110=超时 101=无路由 113=主机不可达 104=被重置");
     }
     diag_line(req, "");
-    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/RATE/FETCH/RETRY/PROBE/DONE/FAIL/CANCEL");
+    diag_line(req, "stage 含义: CONFIG/NVS/NO WIFI/NO KEY/WIFI/SNTP/RATE/FETCH/RETRY/PROBE/HERMES/DONE/FAIL/CANCEL");
     diag_line(req, "tag 含义: DNS=域名没解析出来  CONN=连不上主机  TOUT=连接超时");
     diag_line(req, "          TLS/TLSTO=握手失败  X509=证书解析失败  SOCK/PROTO=建连失败");
     diag_line(req, "          CERT=证书链被拒(多半是缺时间或 CA)  SETOPT=套接字选项失败");
@@ -710,6 +769,13 @@ static esp_err_t diag_get(httpd_req_t *req)
         }
     } else {
         diag_line(req, "--- 读不到设备配置(we_cfg_load 失败)---");
+    }
+    {
+        char hb[64] = "", hu[32] = "";
+        hermes_cfg_read(hb, sizeof(hb), hu, sizeof(hu));
+        diag_line(req, "hermes   : base=\"%s\"  user=\"%s\"  (%s)",
+                  hb[0] ? hb : "(未配置)", hu[0] ? hu : "-",
+                  (hb[0] && hu[0]) ? "第三/四页启用" : "第三/四页关闭");
     }
     diag_line(req, "");
 

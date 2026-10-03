@@ -28,6 +28,8 @@
 #include "lock_hello.h"    // 锁屏薄荷绿点阵位图(自动生成)
 #include "we_cfg.h"        // 社区版配置模型(WiFi 档案 + 平台 Key + 昵称)
 #include "we_diag.h"       // 每次刷新的诊断快照(门户 /diag 页面读取)
+#include "we_hermes.h"     // Hermes 网关响应解析(usage/models/status;纯逻辑可 host 测)
+#include "hermes_avatar.h" // Hermes 女孩头像 104×104 RGB565(gen-avatar.cjs 生成)
 #include "we_hist.h"       // 逐日记账数据模型(NVS 存取;门户备份模块共用)
 #include "we_provider.h"   // 平台适配:直连官方余额接口
 #include "we_portal.h"     // we_cfg_load / we_cfg_save(NVS 存取)
@@ -73,6 +75,9 @@ static const char *TAG = "balance";
 // ---- 双页:TOKEN JOURNEY(主页)/ TOKEN BALANCE(余额页)----
 #define PAGE_JOURNEY 0
 #define PAGE_BALANCE 1
+#define PAGE_HERMES  2            // Hermes 网关实绩(独立口径,不并入 CNY)
+#define PAGE_MODELS  3            // Hermes TOP MODELS
+#define PAGE_COUNT   4
 #define PAGE_SW_MS   220            // 切页滑动动画时长
 
 // 热力图:最近 30 天 = 6 列 × 5 行(旧→新,左上→右下;今天=右下角)
@@ -159,15 +164,84 @@ static const char *TAG = "balance";
 #define LEGEND_HI_Y  283
 #define LEGEND_HI_W  30
 #define LEGEND_HI_H  17
-// 底部翻页点
-#define PAGE_DOT1_X  114
+// 底部翻页点(4 点居中:总宽 4*6+3*12=66,起点 (240-66)/2=87)
+#define PAGE_DOT1_X  87
 #define PAGE_DOT1_Y  304
 #define PAGE_DOT1_W  6
 #define PAGE_DOT1_H  6
-#define PAGE_DOT2_X  126
+#define PAGE_DOT2_X  99
 #define PAGE_DOT2_Y  304
 #define PAGE_DOT2_W  6
 #define PAGE_DOT2_H  6
+#define PAGE_DOT3_X  111
+#define PAGE_DOT3_Y  304
+#define PAGE_DOT3_W  6
+#define PAGE_DOT3_H  6
+#define PAGE_DOT4_X  123
+#define PAGE_DOT4_Y  304
+#define PAGE_DOT4_W  6
+#define PAGE_DOT4_H  6
+// P3 TOKEN HERMES(审核稿 v5.1 定稿;montserrat 档位:16/20/32)
+#define TITLE_H_X    0     // 居中(容器 240 宽)
+#define TITLE_H_Y    8
+#define TITLE_H_W    240
+#define TITLE_H_H    20
+#define HAIR_H_X     8
+#define HAIR_H_Y     40
+#define HAIR_H_W     224
+#define HAIR_H_H     1
+#define AVATAR_H_X   12
+#define AVATAR_H_Y   46
+#define AVATAR_H_W   104
+#define AVATAR_H_H   104
+#define HK_CALLS_L_X 128   // 右半区标签(右对齐)
+#define HK_CALLS_L_Y 48
+#define HK_CALLS_L_W 100
+#define HK_CALLS_L_H 12
+#define HK_CALLS_V_X 128
+#define HK_CALLS_V_Y 60
+#define HK_CALLS_V_W 100
+#define HK_CALLS_V_H 24
+#define HK_SESS_L_X  128
+#define HK_SESS_L_Y  94
+#define HK_SESS_L_W  100
+#define HK_SESS_L_H  12
+#define HK_SESS_V_X  128
+#define HK_SESS_V_Y  106
+#define HK_SESS_V_W  100
+#define HK_SESS_V_H  24
+#define HK_TOK_L_X   128   // TOKENS 标签(右对齐,头像下方)
+#define HK_TOK_L_Y   156
+#define HK_TOK_L_W   100
+#define HK_TOK_L_H   12
+#define HK_TOK_V_X   12    // 数值横跨(25px 千分位放不下右半区,整行右对齐)
+#define HK_TOK_V_Y   168
+#define HK_TOK_V_W   216
+#define HK_TOK_V_H   28
+#define HAIR2_H_Y    200
+#define SECH_H_X     14
+#define SECH_H_Y     206
+#define SECH_H_W     212
+#define SECH_H_H     16
+#define HK_PLAT_X    14    // 平台四行列表(无卡底)
+#define HK_PLAT_Y    226
+#define HK_PLAT_W    212
+#define HK_PLAT_H    52
+#define HK_UPD_Y     282
+// P4 HERMES MODELS
+#define TITLE_M_X    0
+#define TITLE_M_Y    8
+#define TITLE_M_W    240
+#define TITLE_M_H    20
+#define HK_MSUM_X    14    // 副标题行:TOP n / OF m MODELS
+#define HK_MSUM_Y    44
+#define HK_MSUM_W    212
+#define HK_MSUM_H    12
+#define HK_MROW_X    14
+#define HK_MROW_Y0   58    // 首行 y
+#define HK_MROW_W    212
+#define HK_MROW_H    34    // 行高(名+tokens 一行,calls·provider+条形 一行)
+#define HK_MROWS     6
 
 // 宏表与派生几何必须自洽(布局编辑器回写时只动宏,公式不动;对不上就编译期炸)
 _Static_assert(HEAT_CELL_X == HEAT_X0 && HEAT_CELL_Y == HEAT_Y0 &&
@@ -220,9 +294,10 @@ _Static_assert(PAGE_DOT2_X - PAGE_DOT1_X == 12 && PAGE_DOT1_Y == 304, "page dots
 static int row_y_by(int idx, int n);              // 行 y:上对齐,行少下方留白
 #define ROW_YS_STEP(i) row_y_by((i), s_nrow)
 
-static lv_obj_t     *s_scr;          // 根屏(背景 + 双页容器 + 翻页点 + 锁屏遮罩)
-static lv_obj_t     *s_jcont;        // 第 1 页容器:TOKEN JOURNEY(主页)
-static lv_obj_t     *s_bcont;        // 第 2 页容器:TOKEN BALANCE(余额页)
+static lv_obj_t     *s_scr;          // 根屏(背景 + 页容器数组 + 翻页点 + 锁屏遮罩)
+static lv_obj_t     *s_pcont[PAGE_COUNT];   // 4 页容器(横向排列,page_goto 统一位移)
+#define s_jcont s_pcont[PAGE_JOURNEY]      // 第 1 页 TOKEN JOURNEY(别名,兼容既有代码)
+#define s_bcont s_pcont[PAGE_BALANCE]      // 第 2 页 TOKEN BALANCE
 static int           s_page = PAGE_JOURNEY;   // 当前页
 
 // 余额页元素(全部挂在 s_bcont 内,相对坐标同旧版整屏布局)
@@ -254,7 +329,28 @@ static bool          s_cfg_ok;
 static char          s_nick[24];        // 锁屏昵称(社区配置,空=不显示)
 static int           s_nrow;            // 当前实际显示的平台行数(1..3)
 
-static lv_obj_t     *s_pgdot[2];    // 底部翻页点(全局,不随页动)
+// P3 TOKEN HERMES 元素(挂在 s_pcont[PAGE_HERMES])
+static lv_obj_t     *s_h_calls, *s_h_sess, *s_h_tok;     // 数值 label
+static lv_obj_t     *s_h_sech;                            // GATEWAY/PLATFORMS 标题
+static lv_obj_t     *s_h_plat_name[WE_HM_PLAT_MAX], *s_h_plat_dot[WE_HM_PLAT_MAX],
+                    *s_h_plat_st[WE_HM_PLAT_MAX];         // 平台四行
+static lv_obj_t     *s_h_upd, *s_h_err;
+// P4 HERMES MODELS 元素
+static lv_obj_t     *s_m_sum, *s_m_upd, *s_m_err;
+static lv_obj_t     *s_m_name[HK_MROWS], *s_m_tok[HK_MROWS], *s_m_meta[HK_MROWS],
+                    *s_m_bar[HK_MROWS], *s_m_rank[HK_MROWS];
+
+// Hermes 页数据(两页 UI + worker 收尾共享;取数链 hermes_fetch_all 见后文)
+typedef struct {
+    bool           got_usage, got_models, got_status;
+    we_hm_usage_t  usage;
+    we_hm_models_t models;
+    we_hm_status_t status;
+    char           err[16];     // 首个失败的短码(TOUT/CONN/401/E599/...;E%d 最坏 12)
+} hermes_data_t;
+static hermes_data_t s_hmd;
+
+static lv_obj_t     *s_pgdot[PAGE_COUNT];    // 底部翻页点(全局,不随页动)
 static lv_timer_t   *s_timer;      // 电量刷新
 static volatile bool s_busy;
 static volatile bool s_cancel;
@@ -303,6 +399,7 @@ static uint32_t s_auto_ms;
 static void refresh_start(void);
 static bool cfg_load_local(void);          // 定义见 NVS 凭据节
 static void hist_load(void);               // 定义见本地逐日记账节
+static bool updated_hhmm(char *buf, size_t cap);  // 定义见 SNTP 节(P3/P4 刷新共用)
 
 // ---------------------------------------------------------------- 基础构件
 static lv_obj_t *obj_new(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
@@ -621,6 +718,281 @@ static void balance_ui_build(void)
     rows_apply_community();
 }
 
+// ---------------------------------------------------------------- P3 TOKEN HERMES
+static lv_obj_t *hlabel(lv_obj_t *parent, int x, int y, int w, uint32_t color,
+                        const lv_font_t *font, lv_text_align_t align)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_pos(l, x, y);
+    lv_obj_set_width(l, w);
+    lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_align(l, align, 0);
+    lv_label_set_text(l, "--");
+    return l;
+}
+
+static void hermes_ui_build(void)
+{
+    lv_obj_t *c = s_pcont[PAGE_HERMES];
+    lv_obj_t *title = lv_label_create(c);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(C_PURPLE), 0);
+    lv_obj_set_pos(title, TITLE_H_X, TITLE_H_Y);
+    lv_obj_set_width(title, TITLE_H_W);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "HERMES AGENT");
+    obj_new(c, HAIR_H_X, HAIR_H_Y, HAIR_H_W, HAIR_H_H, C_HAIR);
+
+    // 头像(104×104 RGB565,gen-avatar.cjs 生成)
+    static lv_image_dsc_t s_av_dsc;
+    s_av_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_av_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    s_av_dsc.header.flags = 0;
+    s_av_dsc.header.w = HERMES_AV_W;
+    s_av_dsc.header.h = HERMES_AV_H;
+    s_av_dsc.header.stride = HERMES_AV_W * 2;
+    s_av_dsc.data_size = HERMES_AV_W * HERMES_AV_H * 2;
+    s_av_dsc.data = (const uint8_t *)hermes_avatar_map;
+    lv_obj_t *av = lv_image_create(c);
+    lv_image_set_src(av, &s_av_dsc);
+    lv_obj_set_pos(av, AVATAR_H_X, AVATAR_H_Y);
+
+    // 右半区:CALLS / SESSIONS(灰标签 + 白大数,右对齐)
+    hlabel(c, HK_CALLS_L_X, HK_CALLS_L_Y, HK_CALLS_L_W, C_TXT_DIM,
+           &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    s_h_calls = hlabel(c, HK_CALLS_V_X, HK_CALLS_V_Y, HK_CALLS_V_W, C_TXT_HI,
+                       &lv_font_montserrat_32, LV_TEXT_ALIGN_RIGHT);
+    hlabel(c, HK_SESS_L_X, HK_SESS_L_Y, HK_SESS_L_W, C_TXT_DIM,
+           &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    s_h_sess = hlabel(c, HK_SESS_V_X, HK_SESS_V_Y, HK_SESS_V_W, C_TXT_HI,
+                      &lv_font_montserrat_32, LV_TEXT_ALIGN_RIGHT);
+    // TOKENS(标签右对齐;数值横跨整行右对齐,容纳千分位)
+    hlabel(c, HK_TOK_L_X, HK_TOK_L_Y, HK_TOK_L_W, C_TXT_DIM,
+           &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    s_h_tok = hlabel(c, HK_TOK_V_X, HK_TOK_V_Y, HK_TOK_V_W, C_TXT_HI,
+                     &lv_font_montserrat_20, LV_TEXT_ALIGN_RIGHT);
+
+    obj_new(c, HAIR_H_X, HAIR2_H_Y, HAIR_H_W, HAIR_H_H, C_HAIR);
+    s_h_sech = hlabel(c, SECH_H_X, SECH_H_Y, SECH_H_W, C_ACCENT,
+                      &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+    lv_label_set_text(s_h_sech, "GATEWAY / PLATFORMS");
+
+    // 平台四行(灯点 + 名 + 右状态词),行高 13
+    for (int i = 0; i < WE_HM_PLAT_MAX; i++) {
+        int y = HK_PLAT_Y + i * 13;
+        lv_obj_t *dot = obj_new(c, HK_PLAT_X, y + 4, 6, 6, C_DOT_GRAY);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        s_h_plat_dot[i] = dot;
+        s_h_plat_name[i] = hlabel(c, HK_PLAT_X + 12, y, 120, C_TXT_HI,
+                                  &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+        lv_label_set_text(s_h_plat_name[i], "");
+        s_h_plat_st[i] = hlabel(c, HK_PLAT_X + 120, y, 92, C_ACCENT,
+                                &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+        lv_label_set_text(s_h_plat_st[i], "");
+        lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_h_plat_name[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_h_plat_st[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    s_h_upd = hlabel(c, 0, HK_UPD_Y, 240, C_TXT_DIM,
+                     &lv_font_montserrat_14, LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(s_h_upd, "");
+    s_h_err = hlabel(c, 0, HK_UPD_Y, 240, C_DOT_RED,
+                     &lv_font_montserrat_14, LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(s_h_err, "");
+    lv_obj_add_flag(s_h_err, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ---------------------------------------------------------------- P4 HERMES MODELS
+static void models_ui_build(void)
+{
+    lv_obj_t *c = s_pcont[PAGE_MODELS];
+    lv_obj_t *title = lv_label_create(c);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(C_PURPLE), 0);
+    lv_obj_set_pos(title, TITLE_M_X, TITLE_M_Y);
+    lv_obj_set_width(title, TITLE_M_W);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "HERMES MODELS");
+    obj_new(c, HAIR_H_X, HAIR_H_Y, HAIR_H_W, HAIR_H_H, C_HAIR);
+    s_m_sum = hlabel(c, HK_MSUM_X, HK_MSUM_Y, HK_MSUM_W, C_TXT_FAINT,
+                     &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+    lv_label_set_text(s_m_sum, "");
+
+    for (int i = 0; i < HK_MROWS; i++) {
+        int y = HK_MROW_Y0 + i * HK_MROW_H;
+        s_m_rank[i] = hlabel(c, HK_MROW_X, y, 12, C_ACCENT,
+                             &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+        s_m_name[i] = hlabel(c, HK_MROW_X + 14, y, 130, C_TXT,
+                             &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+        s_m_tok[i]  = hlabel(c, HK_MROW_X + 150, y, 62, C_TXT_HI,
+                             &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+        s_m_meta[i] = hlabel(c, HK_MROW_X + 14, y + 17, 130, C_TXT_FAINT,
+                             &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+        s_m_bar[i]  = obj_new(c, HK_MROW_X + 14, y + 27, 8, 3, C_PURPLE);
+        lv_obj_set_style_radius(s_m_bar[i], 2, 0);
+        for (int k = 0; k < 5; k++) {
+            lv_obj_t *o = (k == 0) ? s_m_rank[i] : (k == 1) ? s_m_name[i]
+                        : (k == 2) ? s_m_tok[i] : (k == 3) ? s_m_meta[i] : s_m_bar[i];
+            lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    s_m_upd = hlabel(c, 0, HK_UPD_Y, 240, C_TXT_DIM,
+                     &lv_font_montserrat_14, LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(s_m_upd, "");
+    s_m_err = hlabel(c, 0, HK_UPD_Y, 240, C_DOT_RED,
+                     &lv_font_montserrat_14, LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(s_m_err, "");
+    lv_obj_add_flag(s_m_err, LV_OBJ_FLAG_HIDDEN);
+}
+
+// 大数 → K/M 缩写(固件无 locale,千分位另处理)。返回是否用了缩写
+static void hm_num_str(uint64_t v, char *out, size_t cap)
+{
+    if (v >= 100000000ull) snprintf(out, cap, "%lluM", (unsigned long long)(v / 1000000ull));
+    else if (v >= 1000000ull) snprintf(out, cap, "%llu.%lluM",
+         (unsigned long long)(v / 1000000ull), (unsigned long long)((v / 100000ull) % 10ull));
+    else if (v >= 10000ull) snprintf(out, cap, "%llu.%lluK",
+         (unsigned long long)(v / 1000ull), (unsigned long long)((v / 100ull) % 10ull));
+    else snprintf(out, cap, "%llu", (unsigned long long)v);
+}
+
+// 千分位(65666344 → 65,666,344)。≤13 字符才用全数,否则退回缩写
+static void hm_thousands(uint64_t v, char *out, size_t cap)
+{
+    char raw[24];   // %llu 最坏 20 位 + NUL
+    int n = snprintf(raw, sizeof(raw), "%llu", (unsigned long long)v);
+    if (n < 0 || n >= (int)sizeof(raw)) { out[0] = '\0'; return; }
+    int commas = (n - 1) / 3;
+    if (n + commas + 1 > (int)cap) { hm_num_str(v, out, cap); return; }
+    int o = 0;
+    for (int i = 0; i < n; i++) {
+        if (i > 0 && (n - i) % 3 == 0) out[o++] = ',';
+        out[o++] = raw[i];
+    }
+    out[o] = '\0';
+}
+
+// 用 s_hmd 重绘 P3/P4(worker持锁调用)
+static void hermes_refresh(void)
+{
+    if (!s_h_calls) return;
+    bool any = s_hmd.got_usage || s_hmd.got_models || s_hmd.got_status;
+    if (!any) {
+        // LVGL 自带 vsnprintf 对 %.6s 精度串支持不稳,显式拷贝截断
+        char tag[16];
+        const char *src = s_hmd.err[0] ? s_hmd.err : "NOCONF";
+        int i = 0;
+        for (; src[i] && i < 12; i++) tag[i] = src[i];
+        tag[i] = '\0';
+        if (s_h_err) {
+            char msg[28];
+            snprintf(msg, sizeof(msg), "HERMES FAIL %s", tag);
+            lv_label_set_text(s_h_err, msg);
+            lv_obj_remove_flag(s_h_err, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_m_err) {
+            char msg[28];
+            snprintf(msg, sizeof(msg), "HERMES FAIL %s", tag);
+            lv_label_set_text(s_m_err, msg);
+            lv_obj_remove_flag(s_m_err, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    if (s_h_err) lv_obj_add_flag(s_h_err, LV_OBJ_FLAG_HIDDEN);
+    if (s_m_err) lv_obj_add_flag(s_m_err, LV_OBJ_FLAG_HIDDEN);
+
+    if (s_hmd.got_usage) {
+        char buf[24];
+        hm_num_str(s_hmd.usage.calls, buf, sizeof(buf));
+        lv_label_set_text(s_h_calls, buf);
+        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)s_hmd.usage.sessions_peak);
+        lv_label_set_text(s_h_sess, buf);
+        hm_thousands(s_hmd.usage.tokens, buf, sizeof(buf));
+        lv_label_set_text(s_h_tok, buf);
+    }
+    // 平台:标题恒定,降级只变黄(参考图定稿:不追加 DEGRADED,防溢出)
+    if (s_hmd.got_status) {
+        bool ok = strcmp(s_hmd.status.overall, "ok") == 0;
+        lv_obj_set_style_text_color(s_h_sech,
+            lv_color_hex(ok ? C_ACCENT : C_DOT_YELLOW), 0);
+        for (int i = 0; i < WE_HM_PLAT_MAX; i++) {
+            if (i >= s_hmd.status.plat_count) {
+                lv_obj_add_flag(s_h_plat_dot[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_h_plat_name[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_h_plat_st[i], LV_OBJ_FLAG_HIDDEN);
+                continue;
+            }
+            uint32_t dc = C_DOT_GRAY;
+            const char *st = s_hmd.status.state[i];
+            if (strcmp(st, "connected") == 0) dc = C_DOT_GREEN;
+            else if (strcmp(st, "retrying") == 0) dc = C_DOT_YELLOW;
+            else if (st[0]) dc = C_DOT_RED;
+            lv_obj_set_style_bg_color(s_h_plat_dot[i], lv_color_hex(dc), 0);
+            // 平台名大写(与参考图一致;源字段本就小写)
+            char nm[WE_HM_NAME_MAX];
+            int j = 0;
+            for (; s_hmd.status.plat[i][j] && j < (int)sizeof(nm) - 1; j++) {
+                char ch = s_hmd.status.plat[i][j];
+                nm[j] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : ch;
+            }
+            nm[j] = '\0';
+            lv_label_set_text(s_h_plat_name[i], nm);
+            lv_label_set_text(s_h_plat_st[i], st);
+            lv_obj_remove_flag(s_h_plat_dot[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_h_plat_name[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_h_plat_st[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    char up[24];
+    if (updated_hhmm(up, sizeof(up))) {
+        lv_label_set_text(s_h_upd, up);
+        if (s_m_upd) lv_label_set_text(s_m_upd, up);
+    }
+
+    // P4 模型表
+    if (s_hmd.got_models && s_m_name[0]) {
+        char sm[32];   // "TOP %d OF %d" 两个 %d 最坏 11+11 → 24 会触发 format-truncation
+        snprintf(sm, sizeof(sm), "TOP %d OF %d", s_hmd.models.count > HK_MROWS ? HK_MROWS : s_hmd.models.count,
+                 s_hmd.models.count);
+        lv_label_set_text(s_m_sum, sm);
+        uint64_t maxtk = s_hmd.models.count ? s_hmd.models.item[0].tokens : 1;
+        if (maxtk == 0) maxtk = 1;
+        for (int i = 0; i < HK_MROWS; i++) {
+            if (i >= s_hmd.models.count) {
+                lv_obj_add_flag(s_m_rank[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_m_name[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_m_tok[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_m_meta[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(s_m_bar[i], LV_OBJ_FLAG_HIDDEN);
+                continue;
+            }
+            const we_hm_model_t *m = &s_hmd.models.item[i];
+            char rk[4]; snprintf(rk, sizeof(rk), "%d", i + 1);
+            lv_label_set_text(s_m_rank[i], rk);
+            // 模型名截断(montserrat_14 下 130px ≈ 15 字符)
+            char nm[17]; int k = 0;
+            for (; m->name[k] && k < 15; k++) nm[k] = m->name[k];
+            nm[k] = '\0';
+            lv_label_set_text(s_m_name[i], nm);
+            char tk[16]; hm_num_str(m->tokens, tk, sizeof(tk));
+            lv_label_set_text(s_m_tok[i], tk);
+            char meta[52];   // %llu(20)+固定串+provider(16) 最坏 46
+            snprintf(meta, sizeof(meta), "%llu calls · %s",
+                     (unsigned long long)m->calls, m->provider[0] ? m->provider : "-");
+            lv_label_set_text(s_m_meta[i], meta);
+            int bw = (int)(m->tokens * 150ull / maxtk);
+            if (bw < 8) bw = 8; if (bw > 150) bw = 150;
+            lv_obj_set_width(s_m_bar[i], bw);
+            lv_obj_remove_flag(s_m_rank[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_m_name[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_m_tok[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_m_meta[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_m_bar[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 // 社区行布局:按已配置平台数(1..3)重排行 y、显隐卡槽、写平台名(label 或默认名)
 static void rows_apply_community(void)
 {
@@ -668,7 +1040,7 @@ static void rows_apply_community(void)
 
 static void page_dots_refresh(void)
 {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < PAGE_COUNT; i++) {
         if (!s_pgdot[i]) continue;
         lv_obj_set_style_bg_color(s_pgdot[i],
             lv_color_hex(i == s_page ? C_PURPLE : 0x3A2E6E), 0);
@@ -677,7 +1049,7 @@ static void page_dots_refresh(void)
 
 static void ui_build(void)
 {
-    // 根屏:深空底色;子对象 = 两个页面容器 + 底部翻页点 + (锁屏遮罩后建)
+    // 根屏:深空底色;子对象 = 4 个页面容器 + 底部翻页点 + (锁屏遮罩后建)
     s_scr = lv_obj_create(NULL);
     lv_obj_remove_flag(s_scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_border_width(s_scr, 0, 0);
@@ -686,21 +1058,21 @@ static void ui_build(void)
 
     s_page = PAGE_JOURNEY;
 
-    // 第 1 页在屏内,第 2 页在屏右(离屏隐藏,待切换)
-    s_jcont = page_cont_create(s_scr, 0);
-    s_bcont = page_cont_create(s_scr, 240);
-    bg_build(s_jcont);
-    bg_build(s_bcont);
+    // 4 页横向排开,初始第 1 页在屏内,其余离屏隐藏(page_goto 统一平移)
+    for (int i = 0; i < PAGE_COUNT; i++) {
+        s_pcont[i] = page_cont_create(s_scr, i * 240);
+        bg_build(s_pcont[i]);
+        if (i != PAGE_JOURNEY) lv_obj_add_flag(s_pcont[i], LV_OBJ_FLAG_HIDDEN);
+    }
     journey_ui_build();
     balance_ui_build();
-    lv_obj_add_flag(s_bcont, LV_OBJ_FLAG_HIDDEN);
+    hermes_ui_build();
+    models_ui_build();
 
-    // 底部翻页点(全局,不随页动):2 点近距居中,当前页紫、另一页暗紫
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t *d = obj_new(s_scr, i == 0 ? PAGE_DOT1_X : PAGE_DOT2_X,
-                              i == 0 ? PAGE_DOT1_Y : PAGE_DOT2_Y,
-                              i == 0 ? PAGE_DOT1_W : PAGE_DOT2_W,
-                              i == 0 ? PAGE_DOT1_H : PAGE_DOT2_H, 0x3A2E6E);
+    // 底部翻页点(全局,不随页动):4 点居中,当前页紫、其余暗紫
+    static const int dx[PAGE_COUNT] = { PAGE_DOT1_X, PAGE_DOT2_X, PAGE_DOT3_X, PAGE_DOT4_X };
+    for (int i = 0; i < PAGE_COUNT; i++) {
+        lv_obj_t *d = obj_new(s_scr, dx[i], PAGE_DOT1_Y, PAGE_DOT1_W, PAGE_DOT1_H, 0x3A2E6E);
         lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
         s_pgdot[i] = d;
     }
@@ -733,7 +1105,7 @@ static void battery_tick(lv_timer_t *timer)
 static void ui_forget(void)
 {
     s_scr = NULL;
-    s_jcont = s_bcont = NULL;
+    for (int i = 0; i < PAGE_COUNT; i++) s_pcont[i] = NULL;
     s_state = s_total = NULL;
     s_spent_total = NULL;
     s_heat_sum = NULL;
@@ -742,7 +1114,16 @@ static void ui_forget(void)
         s_dots[i] = NULL; s_amounts[i] = NULL; s_spents[i] = NULL;
     }
     for (int i = 0; i < HEAT_N; i++) s_cells[i] = NULL;
-    for (int i = 0; i < 2; i++) { s_bats[i] = NULL; s_pgdot[i] = NULL; }
+    for (int i = 0; i < 2; i++) s_bats[i] = NULL;
+    for (int i = 0; i < PAGE_COUNT; i++) s_pgdot[i] = NULL;
+    s_h_calls = s_h_sess = s_h_tok = s_h_sech = s_h_upd = s_h_err = NULL;
+    for (int i = 0; i < WE_HM_PLAT_MAX; i++) {
+        s_h_plat_name[i] = s_h_plat_dot[i] = s_h_plat_st[i] = NULL;
+    }
+    s_m_sum = s_m_upd = s_m_err = NULL;
+    for (int i = 0; i < HK_MROWS; i++) {
+        s_m_rank[i] = s_m_name[i] = s_m_tok[i] = s_m_meta[i] = s_m_bar[i] = NULL;
+    }
 }
 
 // 摘要右对齐文本(卡片右侧大字)
@@ -787,18 +1168,18 @@ static void journey_refresh(void)
     }
 }
 
-// 直接切换页面(无动画):journey x∈{0,-240},balance 恒在其右 240px
+// 直接切换页面(无动画):整排容器左移 to*240,只放开目标页
 static void page_goto(int to)
 {
-    if (to == s_page || !s_scr || !s_jcont || !s_bcont) return;
+    if (to == s_page || !s_scr || to < 0 || to >= PAGE_COUNT) return;
+    if (!s_pcont[0]) return;
     s_page = to;
-    int x = (to == PAGE_JOURNEY) ? 0 : -240;
-    lv_obj_set_x(s_jcont, x);
-    lv_obj_set_x(s_bcont, x + 240);
-    lv_obj_t *off = (to == PAGE_JOURNEY) ? s_bcont : s_jcont;
-    lv_obj_t *on  = (to == PAGE_JOURNEY) ? s_jcont : s_bcont;
-    lv_obj_add_flag(off, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(on, LV_OBJ_FLAG_HIDDEN);
+    int x = -to * 240;
+    for (int i = 0; i < PAGE_COUNT; i++) {
+        lv_obj_set_x(s_pcont[i], x + i * 240);
+        if (i == to) lv_obj_remove_flag(s_pcont[i], LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(s_pcont[i], LV_OBJ_FLAG_HIDDEN);
+    }
     page_dots_refresh();
 }
 
@@ -1002,10 +1383,10 @@ void demo_balance_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         return;
     }
 
-    // DOWN:水平滑动切换 主页 ↔ 余额页(动画中忽略;解锁 500ms 内忽略收尾事件)
+    // DOWN:水平滑动切换 4 页循环(JOURNEY→BALANCE→HERMES→MODELS→…)
     if (btn == BSP_BTN_DOWN && ev == BSP_BTN_CLICK) {
         if (lv_tick_get() - s_unlock_at < 500) return;
-        page_goto(s_page == PAGE_JOURNEY ? PAGE_BALANCE : PAGE_JOURNEY);
+        page_goto((s_page + 1) % PAGE_COUNT);
         return;
     }
 
@@ -1300,6 +1681,172 @@ static double fetch_usd_rate(char *buf, size_t cap)
     return -1;
 }
 
+// ---------------------------------------------------------------- Hermes 网关客户端
+// 协议(2026-10-03 在用户网关 v0.21.5 实测):
+//   POST <base>/auth/password-login {"provider":"basic","username":..,"password":..}
+//     → 200 {"ok":true} + Set-Cookie: hermes_session_at=..(HttpOnly,12h)
+//   GET <base>/api/status 免认证;<base>/api/analytics/* 只认上面的 Cookie(不认 Basic 头!)
+// 局域网明文 HTTP:无 TLS 峰值,20KB 大缓冲安全;任何失败静默跳过本轮(独立口径页,
+// 不拖累余额)。Cookie 进程内缓存,401 时重登一次。
+#define HM_BASE_MAX   64
+#define HM_USER_MAX   32
+#define HM_PASS_MAX   64
+#define HM_COOKIE_MAX 192
+#define HM_NVS_NS     "cfg"
+#define HM_BODY_MAX   24576      // usage/models 实测 15~18KB(30 天),留涨量
+
+static char s_hm_base[HM_BASE_MAX];
+static char s_hm_user[HM_USER_MAX];
+static char s_hm_pass[HM_PASS_MAX];
+static char s_hm_cookie[HM_COOKIE_MAX];   // 空 = 未登录/免认证路径
+static bool s_hm_loaded;
+
+static void hermes_cfg_load(void)
+{
+    s_hm_base[0] = s_hm_user[0] = s_hm_pass[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(HM_NVS_NS, NVS_READONLY, &h) != ESP_OK) { s_hm_loaded = true; return; }
+    size_t len = sizeof(s_hm_base);
+    if (nvs_get_str(h, "hbase", s_hm_base, &len) != ESP_OK) s_hm_base[0] = '\0';
+    len = sizeof(s_hm_user);
+    if (nvs_get_str(h, "huser", s_hm_user, &len) != ESP_OK) s_hm_user[0] = '\0';
+    len = sizeof(s_hm_pass);
+    if (nvs_get_str(h, "hpass", s_hm_pass, &len) != ESP_OK) s_hm_pass[0] = '\0';
+    nvs_close(h);
+    s_hm_loaded = true;
+}
+
+static bool hermes_configured(void)
+{
+    if (!s_hm_loaded) hermes_cfg_load();
+    return s_hm_base[0] && s_hm_user[0];        // 密码可空(网关未设口令时)
+}
+
+// 通用 GET:path 以 / 开头;out 收响应体(NUL 结尾),返回 HTTP 状态码(0=传输失败)。
+// cookie_req: 是否带 Cookie(status 不需要)。
+static int hermes_get(const char *path, char *out, size_t cap, bool cookie_req)
+{
+    char url[HM_BASE_MAX + 64];
+    snprintf(url, sizeof(url), "%s%s", s_hm_base, path);
+    esp_http_client_config_t hcfg = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .keep_alive_enable = false,
+    };
+    esp_http_client_handle_t cl = esp_http_client_init(&hcfg);
+    if (!cl) return 0;
+    if (cookie_req && s_hm_cookie[0]) esp_http_client_set_header(cl, "Cookie", s_hm_cookie);
+    int status = 0;
+    if (esp_http_client_open(cl, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(cl);
+        status = esp_http_client_get_status_code(cl);
+        size_t used = 0;
+        int r;
+        while (used + 1 < cap &&
+               (r = esp_http_client_read(cl, out + used, cap - used - 1)) > 0) used += (size_t)r;
+        out[used] = '\0';
+        esp_http_client_close(cl);
+    }
+    esp_http_client_cleanup(cl);
+    return status;
+}
+
+// 登录并缓存 Cookie。成功 true。失败(网络/401)false。
+static bool hermes_login(void)
+{
+    char url[HM_BASE_MAX + 32];
+    snprintf(url, sizeof(url), "%s/auth/password-login", s_hm_base);
+    char body[HM_USER_MAX + HM_PASS_MAX + 64];
+    int bl = snprintf(body, sizeof(body),
+                      "{\"provider\":\"basic\",\"username\":\"%s\",\"password\":\"%s\"}",
+                      s_hm_user, s_hm_pass);
+    if (bl < 0 || (size_t)bl >= sizeof(body)) return false;    // 用户名含引号等,拒登
+    esp_http_client_config_t hcfg = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .keep_alive_enable = false,
+    };
+    esp_http_client_handle_t cl = esp_http_client_init(&hcfg);
+    if (!cl) return false;
+    esp_http_client_set_header(cl, "Content-Type", "application/json");
+    bool ok = false;
+    if (esp_http_client_open(cl, bl) == ESP_OK) {
+        if (esp_http_client_write(cl, body, bl) == bl) {
+            esp_http_client_fetch_headers(cl);
+            if (esp_http_client_get_status_code(cl) == 200) {
+                char *hv = NULL;
+                if (esp_http_client_get_header(cl, "Set-Cookie", &hv) == ESP_OK && hv) {
+                    // 只要 hermes_session_at=...; 段
+                    const char *at = strstr(hv, "hermes_session_at=");
+                    if (at) {
+                        const char *sc = strchr(at, ';');
+                        size_t n = sc ? (size_t)(sc - at) : strlen(at);
+                        if (n >= sizeof(s_hm_cookie)) n = sizeof(s_hm_cookie) - 1;
+                        memcpy(s_hm_cookie, at, n);
+                        s_hm_cookie[n] = '\0';
+                    }
+                }
+                char rb[128];
+                int r = esp_http_client_read(cl, rb, sizeof(rb) - 1);
+                if (r > 0) { rb[r] = '\0'; ok = we_hm_parse_login(rb); }
+                else ok = s_hm_cookie[0] != '\0';       // 没回体但给了 Cookie 也认
+            }
+        }
+        esp_http_client_close(cl);
+    }
+    esp_http_client_cleanup(cl);
+    if (!ok) s_hm_cookie[0] = '\0';
+    return ok;
+}
+
+// 取一个 JSON 接口;401 自动重登一次。返回状态码。
+static int hermes_get_api(const char *path, char *out, size_t cap)
+{
+    int st = hermes_get(path, out, cap, true);
+    if (st == 401) {
+        if (hermes_login()) st = hermes_get(path, out, cap, true);
+        else st = 401;
+    }
+    return st;
+}
+
+// 整条 Hermes 取数链(在余额与汇率全部完成之后调用;Wi-Fi 尚连接)。
+// 任何一步失败只记短码,不影响余额结果。
+static void hm_err_set(hermes_data_t *d, int st)
+{
+    if (d->err[0]) return;                       // 保留首个失败码
+    if (st == 0) snprintf(d->err, sizeof(d->err), "TOUT");
+    else snprintf(d->err, sizeof(d->err), "E%d", st);
+}
+
+static void hermes_fetch_all(void)
+{
+    memset(&s_hmd, 0, sizeof(s_hmd));
+    if (!hermes_configured()) return;
+    static char buf[HM_BODY_MAX];                  // 20KB static:无 PSRAM 但明文 HTTP 无 TLS 峰值
+
+    if (s_hm_cookie[0] == '\0' && !hermes_login()) {
+        snprintf(s_hmd.err, sizeof(s_hmd.err), "401");
+        return;
+    }
+    int st = hermes_get_api("/api/analytics/usage?days=30", buf, sizeof(buf));
+    if (st == 200 && we_hm_parse_usage(buf, &s_hmd.usage)) s_hmd.got_usage = true;
+    else hm_err_set(&s_hmd, st);
+
+    st = hermes_get_api("/api/analytics/models?days=30", buf, sizeof(buf));
+    if (st == 200 && we_hm_parse_models(buf, &s_hmd.models)) {
+        we_hm_models_sort(&s_hmd.models);
+        s_hmd.got_models = true;
+    } else hm_err_set(&s_hmd, st);
+
+    st = hermes_get("/api/status", buf, sizeof(buf), false);   // 免认证
+    if (st == 200 && we_hm_parse_status(buf, &s_hmd.status)) s_hmd.got_status = true;
+    ESP_LOGI(TAG, "hermes: usage=%d models=%d status=%d err=%s",
+             s_hmd.got_usage, s_hmd.got_models, s_hmd.got_status, s_hmd.err);
+}
+
 // dg 可为 NULL。失败时回填:open_err(0x7000 段)、tls_err(0x8000 段)、mbedTLS 码、
 // 证书校验标志、HTTP 状态码、响应体预览 —— 屏幕短码由 we_diag_tag_from_pair 决定。
 static int https_fetch_provider(const we_provider_t *prov, const char *key,
@@ -1319,7 +1866,6 @@ static int https_fetch_provider(const we_provider_t *prov, const char *key,
     snprintf(auth, sizeof(auth), "Bearer %s", key);
     esp_http_client_set_header(cl, "Authorization", auth);
     esp_http_client_set_header(cl, "Accept", "application/json");
-
     esp_err_t err = esp_http_client_open(cl, 0);
     if (err != ESP_OK) {
         int tls_err = 0, tls_code = 0, tls_flags = 0;
@@ -1867,6 +2413,16 @@ static void balance_worker(void *arg)
             set_state(msg);
             s_data_ok = false;
         }
+        bsp_lvgl_unlock();
+    }
+
+    // Hermes 取数:排在余额与汇率**全部完成之后**(铁律:非关键请求不得挡在
+    // 关键请求前)。局域网明文 HTTP 无 TLS 峰值;失败只影响 P3/P4 两页。
+    if (!s_cancel && hermes_configured()) {
+        we_diag_set_stage("HERMES");
+        hermes_fetch_all();
+        bsp_lvgl_lock(1000);
+        hermes_refresh();
         bsp_lvgl_unlock();
     }
 

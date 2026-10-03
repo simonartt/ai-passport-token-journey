@@ -4,6 +4,20 @@
 
 # Changelog
 
+## 2026-10-04
+
+- 卡片新增两页，把局域网里的 [Hermes](https://hermes.example) 网关搬上屏——这样它能显示 agent 到底干了什么，而不只是三家平台的余额。固件现在是四页循环：TOKEN JOURNEY ↔ TOKEN BALANCE ↔ HERMES ↔ HERMES MODELS，DOWN 键翻页，底部翻页点从 2 个扩成 4 个。**HERMES**（第 3 页）放 agent 头像、`TOKENS` 大数、右侧右对齐的 `CALLS` 与 `SESSIONS`，以及 `GATEWAY / PLATFORMS` 列表：feishu / telegram / weixin / discord 四行，每行带状态灯和实时状态词。**HERMES MODELS**（第 4 页）按 token 量列前 6 个模型，每行是序号 + 模型名 + token 数 + 下一行 `calls · provider`，底部条形图按头部模型归一。数据来自网关自己的分析接口：`GET /api/analytics/usage?days=30`（在设备上聚合成 30 天 tokens / calls / 并发会话峰值）、`GET /api/analytics/models?days=30`，平台状态来自 `GET /api/status`。网关统计的是**过网关的 agent 流量**（含本地跑的零成本模型），和余额页的币种口径**不同**，因此**刻意不并入人民币合计**，而是单独成页。
+
+- 访问网关要两步，因为它的 `api/*` 不认 Basic 头——只认浏览器登录产生的会话 Cookie。设备现在先 `POST /auth/password-login {"provider":"basic",…}` 一次，把返回的 `hermes_session_at` Cookie 留在 RAM 里，带它发两个 analytics 请求，遇到 `401` 自动重登一次。网关走局域网明文 HTTP，所以这一段不像平台取数那样要 TLS 握手和证书缓冲。配置（地址 / 用户名 / 密码）是门户配置页新增的一段，按 `cfg` 下的三个 NVS 键存（`hbase`/`huser`/`hpass`）；密码留空表示保留原值，与既有的增量保存语义一致。`/diag` 会报告是否配了网关、三个响应各自有没有到。
+
+- **取数顺序**：整条 Hermes 链排在**所有平台余额之后、汇率之后**，绝不排在前面。这就是 v1.1.6 的教训：两发慢的非关键请求垫在最慢主机前面，那个主机就丢了。网关慢、连不上或没配，都不允许拖慢余额。
+
+- 解析拆成新的纯逻辑模块 `main/we_hermes.{h,c}`（有 host 测试、不依赖 ESP）：从 `analytics/usage` 提 30 天聚合、从 `analytics/models` 提前 6 个模型、从 `status` 提网关与平台状态。两个 analytics 响应实测 15 KB 和 18 KB，远超这颗片常用的 4 KB 响应缓冲——所以用 24 KB 静态缓冲接收，而这里正好因为是明文 HTTP、不产生握手峰值才安全。`tests/test_we_hermes.c` 用真实抓取的响应做断言，含大 payload 分支。几个小缓冲在 `-Werror=format-truncation` 下可能被静默截断，已加宽（`err` 8→16、`raw` 20→24、`meta` 40→52）。
+
+- 头像以 `main/hermes_avatar.h` 编译进固件：104×104 的 1-bit `LV_COLOR16` 位图，由 `journey-web/gen-avatar.cjs`（resvg）从源 SVG 生成——走的正是锁屏头像已有的路线，不需要 PNG 解码器。生成时背景透明、图形取强调色，所以换配色方案头像也跟着变。
+
+- 三条响应都没回来时，两页都显示 `HERMES FAIL` 加短码（`TOUT` / `401` / 状态码 / 未配网关时的 `NOCONF`），而不是满屏 `--`。`GATEWAY / PLATFORMS` 标题是固定字符串：网关降级时只改颜色、不改长度，所以标题永远不会超出 212px 文字区。
+
 ## 2026-10-03
 
 - OpenRouter 的余额是美元，另外两家是人民币——卡片上 "5.00" 和 "146.09" 并排放着既不能相加也不能比大小。现在只要配置了美元平台，设备就会先取实时美元汇率（首选 frankfurter.dev，备用 open.er-api.com，两者响应都很小、证书都在内置 CA 包里），把美元金额折成人民币后再进显示、进逐日记账、进 30 天热力图，三个平台统一按人民币合计。汇率写进 NVS 缓存（`cfg`/`usdcny`，×1000 存整数），两个在线源都失败就用缓存，最后兜底 6.800。`/diag` 会打印本次用的汇率和来源（`live`/`cache`/`default`）。因为记账基线也存折算后的人民币，所以余额没变、只是汇率波动的那天，会出现美分级的小额伪"花费"——这是能跨平台合计的单币种记账模型的固有代价。
