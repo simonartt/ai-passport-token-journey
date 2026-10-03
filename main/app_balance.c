@@ -982,7 +982,8 @@ static void hermes_refresh(void)
                      (unsigned long long)m->calls, m->provider[0] ? m->provider : "-");
             lv_label_set_text(s_m_meta[i], meta);
             int bw = (int)(m->tokens * 150ull / maxtk);
-            if (bw < 8) bw = 8; if (bw > 150) bw = 150;
+            if (bw < 8) bw = 8;
+            if (bw > 150) bw = 150;
             lv_obj_set_width(s_m_bar[i], bw);
             lv_obj_remove_flag(s_m_rank[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(s_m_name[i], LV_OBJ_FLAG_HIDDEN);
