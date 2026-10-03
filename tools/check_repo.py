@@ -193,6 +193,23 @@ def check_conflict_markers(files: list[Path], errors: list[str]) -> None:
             errors.append(f"{path.relative_to(ROOT)}: unresolved merge conflict marker")
 
 
+def check_resident_memory(errors: list[str]) -> None:
+    """常驻静态缓冲不能超过预算(无 PSRAM 的 C3 上会压垮堆的最大连续块)。"""
+    budget = ROOT / "tools" / "check_mem_budget.py"
+    if not budget.exists():
+        return
+    result = subprocess.run(
+        [sys.executable, str(budget), str(ROOT / "main")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        for line in result.stdout.splitlines():
+            if line.startswith("FAIL") or "常驻" in line or "修法" in line:
+                errors.append(f"resident memory budget: {line}")
+
+
 def main() -> int:
     errors: list[str] = []
     files = text_files()
@@ -203,6 +220,7 @@ def main() -> int:
     check_issue_forms(errors)
     check_sensitive_content(files, errors)
     check_conflict_markers(files, errors)
+    check_resident_memory(errors)
 
     if errors:
         for error in errors:

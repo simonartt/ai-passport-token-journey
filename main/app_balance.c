@@ -299,6 +299,8 @@ static lv_obj_t     *s_pcont[PAGE_COUNT];   // 4 页容器(横向排列,page_got
 #define s_jcont s_pcont[PAGE_JOURNEY]      // 第 1 页 TOKEN JOURNEY(别名,兼容既有代码)
 #define s_bcont s_pcont[PAGE_BALANCE]      // 第 2 页 TOKEN BALANCE
 static int           s_page = PAGE_JOURNEY;   // 当前页
+// P3/P4 控件是否已建(懒加载,见 page_goto):这两页常驻会压垮无 PSRAM 的堆
+static bool          s_built[PAGE_COUNT] = { false };
 
 // 余额页元素(全部挂在 s_bcont 内,相对坐标同旧版整屏布局)
 static lv_obj_t     *s_cards[ROW_COUNT];    // 平台卡(社区按配置数显隐)
@@ -1071,8 +1073,10 @@ static void ui_build(void)
     }
     journey_ui_build();
     balance_ui_build();
-    hermes_ui_build();
-    models_ui_build();
+    // P3/P4 懒加载:这两页共约 56 个 LVGL 对象(≈12KB 堆),开机就建会把无 PSRAM 的
+    // 堆连续块压到 DNS 解析分配 PCB 失败(表现为三家余额全 DNS 错、门户 httpd 起不来)。
+    // 改成"首次翻到该页才建、离开即销毁",数据仍留在 s_hmd,翻回来重建即可。
+    s_built[PAGE_HERMES] = s_built[PAGE_MODELS] = false;
 
     // 底部翻页点(全局,不随页动):4 点居中,当前页紫、其余暗紫
     static const int dx[PAGE_COUNT] = { PAGE_DOT1_X, PAGE_DOT2_X, PAGE_DOT3_X, PAGE_DOT4_X };
@@ -1111,6 +1115,7 @@ static void ui_forget(void)
 {
     s_scr = NULL;
     for (int i = 0; i < PAGE_COUNT; i++) s_pcont[i] = NULL;
+    for (int i = 0; i < PAGE_COUNT; i++) s_built[i] = false;
     s_state = s_total = NULL;
     s_spent_total = NULL;
     s_heat_sum = NULL;
@@ -1174,10 +1179,32 @@ static void journey_refresh(void)
 }
 
 // 直接切换页面(无动画):整排容器左移 to*240,只放开目标页
+// P3/P4 懒加载:建 → 用 → 离开即毁。数据留在 s_hmd,翻回来重建并重填。
+// 只在这两页之间做(不走平衡页),否则用户看不到这两页却已付了内存代价。
+static void hpage_release(int p)
+{
+    if (!s_built[p] || !s_pcont[p]) return;
+    lv_obj_clean(s_pcont[p]);
+    bg_build(s_pcont[p]);
+    s_built[p] = false;
+    if (p == PAGE_HERMES) {
+        s_h_calls = s_h_sess = s_h_tok = s_h_sech = s_h_upd = s_h_err = NULL;
+        for (int i = 0; i < WE_HM_PLAT_MAX; i++) {
+            s_h_plat_name[i] = s_h_plat_dot[i] = s_h_plat_st[i] = NULL;
+        }
+    } else {
+        s_m_sum = s_m_upd = s_m_err = NULL;
+        for (int i = 0; i < HK_MROWS; i++) {
+            s_m_rank[i] = s_m_name[i] = s_m_tok[i] = s_m_meta[i] = s_m_bar[i] = NULL;
+        }
+    }
+}
+
 static void page_goto(int to)
 {
     if (to == s_page || !s_scr || to < 0 || to >= PAGE_COUNT) return;
     if (!s_pcont[0]) return;
+    int prev = s_page;
     s_page = to;
     int x = -to * 240;
     for (int i = 0; i < PAGE_COUNT; i++) {
@@ -1185,6 +1212,14 @@ static void page_goto(int to)
         if (i == to) lv_obj_remove_flag(s_pcont[i], LV_OBJ_FLAG_HIDDEN);
         else         lv_obj_add_flag(s_pcont[i], LV_OBJ_FLAG_HIDDEN);
     }
+    // 首次进入 P3/P4 才建控件;离开 P3/P4 立刻释放,只保留另一张 Hermes 页
+    if ((to == PAGE_HERMES || to == PAGE_MODELS) && !s_built[to]) {
+        if (to == PAGE_HERMES) hermes_ui_build(); else models_ui_build();
+        s_built[to] = true;
+        hermes_refresh();                      // 重建后立刻把已有数据填上
+    }
+    if (prev == PAGE_HERMES && to != PAGE_HERMES) hpage_release(PAGE_HERMES);
+    if (prev == PAGE_MODELS && to != PAGE_MODELS) hpage_release(PAGE_MODELS);
     page_dots_refresh();
 }
 
@@ -1698,7 +1733,16 @@ static double fetch_usd_rate(char *buf, size_t cap)
 #define HM_PASS_MAX   64
 #define HM_COOKIE_MAX 192
 #define HM_NVS_NS     "cfg"
-#define HM_BODY_MAX   24576      // usage/models 实测 15~18KB(30 天),留涨量
+// 8KB,不是 24KB:v1.1.8 曾用 24KB 常驻缓冲,把堆最大连续块从 ~30KB 压到不足 6KB,
+// DNS 解析要分配的 PCB 第一个失败,连带三家余额和门户 httpd 全挂。这块是常驻 static,
+// 直接吃 DRAM,不是"明文 HTTP 就没有峰值"能抵消的。
+// 与之配套 HM_DAYS 必须留在 8KB 缓冲装得下的范围内(见 hermes_fetch_all 注释)。
+#define HM_BODY_MAX   8192
+// 7 天窗口实测 usage 6.7KB / models 4.8KB(status 2.0KB),都在 8KB 内。
+// P3 只显示 30 天口径的聚合值吗?——不显示,屏上只有 TOKENS/CALLS/SESSIONS 三个数,
+// 所以窗口缩短不损失任何屏幕信息。若以后要回到 30 天口径,必须先做流式解析
+// (边收边提取,不要整读),不能只把 HM_DAYS 调大。
+#define HM_DAYS       7
 
 static char s_hm_base[HM_BASE_MAX];
 static char s_hm_user[HM_USER_MAX];
@@ -1830,17 +1874,20 @@ static void hermes_fetch_all(void)
 {
     memset(&s_hmd, 0, sizeof(s_hmd));
     if (!hermes_configured()) return;
-    static char buf[HM_BODY_MAX];                  // 20KB static:无 PSRAM 但明文 HTTP 无 TLS 峰值
+    static char buf[HM_BODY_MAX];   // 8KB 常驻:装得下 HM_DAYS=7 的两个 analytics 响应
 
     if (s_hm_cookie[0] == '\0' && !hermes_login()) {
         snprintf(s_hmd.err, sizeof(s_hmd.err), "401");
         return;
     }
-    int st = hermes_get_api("/api/analytics/usage?days=30", buf, sizeof(buf));
+    char path[64];
+    snprintf(path, sizeof(path), "/api/analytics/usage?days=%d", HM_DAYS);
+    int st = hermes_get_api(path, buf, sizeof(buf));
     if (st == 200 && we_hm_parse_usage(buf, &s_hmd.usage)) s_hmd.got_usage = true;
     else hm_err_set(&s_hmd, st);
 
-    st = hermes_get_api("/api/analytics/models?days=30", buf, sizeof(buf));
+    snprintf(path, sizeof(path), "/api/analytics/models?days=%d", HM_DAYS);
+    st = hermes_get_api(path, buf, sizeof(buf));
     if (st == 200 && we_hm_parse_models(buf, &s_hmd.models)) {
         we_hm_models_sort(&s_hmd.models);
         s_hmd.got_models = true;
