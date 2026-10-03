@@ -6,13 +6,17 @@
 
 ## 2026-10-04
 
-- 卡片新增两页，把局域网里的 [Hermes](https://hermes.example) 网关搬上屏——这样它能显示 agent 到底干了什么，而不只是三家平台的余额。固件现在是四页循环：TOKEN JOURNEY ↔ TOKEN BALANCE ↔ HERMES ↔ HERMES MODELS，DOWN 键翻页，底部翻页点从 2 个扩成 4 个。**HERMES**（第 3 页）放 agent 头像、`TOKENS` 大数、右侧右对齐的 `CALLS` 与 `SESSIONS`，以及 `GATEWAY / PLATFORMS` 列表：feishu / telegram / weixin / discord 四行，每行带状态灯和实时状态词。**HERMES MODELS**（第 4 页）按 token 量列前 6 个模型，每行是序号 + 模型名 + token 数 + 下一行 `calls · provider`，底部条形图按头部模型归一。数据来自网关自己的分析接口：`GET /api/analytics/usage?days=30`（在设备上聚合成 30 天 tokens / calls / 并发会话峰值）、`GET /api/analytics/models?days=30`，平台状态来自 `GET /api/status`。网关统计的是**过网关的 agent 流量**（含本地跑的零成本模型），和余额页的币种口径**不同**，因此**刻意不并入人民币合计**，而是单独成页。
+- **修掉一个把整块板子都搞挂的回归，不只是新页。** v1.1.8 把 Hermes 两个 analytics 响应（实测 15~18KB）读进一个 24KB 常驻缓冲，当时的理由是「走局域网明文 HTTP，没有握手内存峰值」。这个推理是错的：常驻 static 缓冲是堆永远拿不到的 DRAM，跟有没有握手无关。这颗片没有 PSRAM，而 v1.1.4 的诊断记录里最大连续块是 29.7KB —— 拿掉 24KB 就只剩不足 6KB，第一个需要它的是 lwip 解析 DNS 时的 PCB。所以**三家平台全报 DNS**，不只是 Hermes；门户的 httpd 也起不来。现在缓冲降到 8KB、窗口改成 7 天（实测 usage 6.7KB / models 4.8KB / status 2.0KB；30 天则是 17.8KB / 14.7KB）。屏幕上不损失任何信息——第 3 页不显示窗口长度——但以后要回到 30 天口径必须改成流式解析（边收边提取），而不是把常量调大。另外两个新页（约 56 个 LVGL 对象、约 12KB 堆）改成首次翻到才建、离开即销毁，数据留在内存里，翻回来重绘。
+
+- **加一道防线，保证这类问题不会再发出去。** `tools/check_mem_budget.py` 会对任何超过 8KB 的常驻 static 缓冲直接判失败，`tools/check_repo.py` 会跑它。这一个本地测试和 CI 都看不见：板子连域名都解析不了的时候，两边都是绿的。内存预算得像其他不变量一样被断言。
+
+- 卡片新增两页，把局域网里的 [Hermes](https://hermes.example) 网关搬上屏——这样它能显示 agent 到底干了什么，而不只是三家平台的余额。固件现在是四页循环：TOKEN JOURNEY ↔ TOKEN BALANCE ↔ HERMES ↔ HERMES MODELS，DOWN 键翻页，底部翻页点从 2 个扩成 4 个。**HERMES**（第 3 页）放 agent 头像、`TOKENS` 大数、右侧右对齐的 `CALLS` 与 `SESSIONS`，以及 `GATEWAY / PLATFORMS` 列表：feishu / telegram / weixin / discord 四行，每行带状态灯和实时状态词。**HERMES MODELS**（第 4 页）按 token 量列前 6 个模型，每行是序号 + 模型名 + token 数 + 下一行 `calls · provider`，底部条形图按头部模型归一。数据来自网关自己的分析接口：`GET /api/analytics/usage?days=7`（在设备上聚合成 tokens / calls / 并发会话峰值）、`GET /api/analytics/models?days=7`，平台状态来自 `GET /api/status`。网关统计的是**过网关的 agent 流量**（含本地跑的零成本模型），和余额页的币种口径**不同**，因此**刻意不并入人民币合计**，而是单独成页。
 
 - 访问网关要两步，因为它的 `api/*` 不认 Basic 头——只认浏览器登录产生的会话 Cookie。设备现在先 `POST /auth/password-login {"provider":"basic",…}` 一次，把返回的 `hermes_session_at` Cookie 留在 RAM 里，带它发两个 analytics 请求，遇到 `401` 自动重登一次。网关走局域网明文 HTTP，所以这一段不像平台取数那样要 TLS 握手和证书缓冲。配置（地址 / 用户名 / 密码）是门户配置页新增的一段，按 `cfg` 下的三个 NVS 键存（`hbase`/`huser`/`hpass`）；密码留空表示保留原值，与既有的增量保存语义一致。`/diag` 会报告是否配了网关、三个响应各自有没有到。
 
 - **取数顺序**：整条 Hermes 链排在**所有平台余额之后、汇率之后**，绝不排在前面。这就是 v1.1.6 的教训：两发慢的非关键请求垫在最慢主机前面，那个主机就丢了。网关慢、连不上或没配，都不允许拖慢余额。
 
-- 解析拆成新的纯逻辑模块 `main/we_hermes.{h,c}`（有 host 测试、不依赖 ESP）：从 `analytics/usage` 提 30 天聚合、从 `analytics/models` 提前 6 个模型、从 `status` 提网关与平台状态。两个 analytics 响应实测 15 KB 和 18 KB，远超这颗片常用的 4 KB 响应缓冲——所以用 24 KB 静态缓冲接收，而这里正好因为是明文 HTTP、不产生握手峰值才安全。`tests/test_we_hermes.c` 用真实抓取的响应做断言，含大 payload 分支。几个小缓冲在 `-Werror=format-truncation` 下可能被静默截断，已加宽（`err` 8→16、`raw` 20→24、`meta` 40→52）。
+- 解析拆成新的纯逻辑模块 `main/we_hermes.{h,c}`（有 host 测试、不依赖 ESP）：从 `analytics/usage` 提聚合、从 `analytics/models` 提前 6 个模型、从 `status` 提网关与平台状态。`tests/test_we_hermes.c` 用真实抓取的响应做断言，含大 payload 分支。几个小缓冲在 `-Werror=format-truncation` 下可能被静默截断，已加宽（`err` 8→16、`raw` 20→24、`meta` 40→52）。
 
 - 头像以 `main/hermes_avatar.h` 编译进固件：104×104 的 1-bit `LV_COLOR16` 位图，由 `journey-web/gen-avatar.cjs`（resvg）从源 SVG 生成——走的正是锁屏头像已有的路线，不需要 PNG 解码器。生成时背景透明、图形取强调色，所以换配色方案头像也跟着变。
 

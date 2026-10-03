@@ -7,9 +7,13 @@
 //   GET  /api/analytics/usage?days=30   (需Cookie) daily[]{tokens,api_calls,sessions,...}
 //   GET  /api/analytics/models?days=30  (需Cookie) models[]{model,provider,tokens,calls}
 //
-// usage/models 响应实测 15~18KB,远超余额用的 4KB 缓冲。这里按"整读进大缓冲 +
-// strstr 提取"设计:Hermes 走局域网明文 HTTP,没有 TLS 握手内存峰值,20KB static
-// 缓冲在 C3 上安全(失败时调用方跳过本轮即可)。
+// usage/models 响应实测(days=7:6.7KB/4.8KB;days=30:17.8KB/14.7KB),远超余额用的
+// 4KB 缓冲。这里按"整读进缓冲 + strstr 提取"设计,调用方给 8KB 缓冲并用 7 天窗口。
+//
+// **不要因为"明文 HTTP 没有握手峰值"就放大缓冲**:常驻 static 缓冲是堆永远拿不到的
+// DRAM。v1.1.8 用 24KB 时把最大连续块从 ~30KB 压到不足 6KB,第一个失败的是 lwip 解析
+// DNS 的 PCB,结果三家平台全报 DNS、门户 httpd 也起不来。tools/check_mem_budget.py
+// 会对此判失败。窗口要更长只能改流式解析(边收边提取),不能调大常量。
 //
 // 注意口径:这是"网关侧 agent 用量"(含本地 lmstudio 模型,cost 常为 0),
 // 与三家 API 余额不是一个币种口径,UI 上单独成页,绝不并入 CNY 合计。
