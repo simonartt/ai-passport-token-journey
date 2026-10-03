@@ -759,17 +759,21 @@ static void hermes_ui_build(void)
     lv_obj_set_pos(av, AVATAR_H_X, AVATAR_H_Y);
 
     // 右半区:CALLS / SESSIONS(灰标签 + 白大数,右对齐)
-    hlabel(c, HK_CALLS_L_X, HK_CALLS_L_Y, HK_CALLS_L_W, C_TXT_DIM,
-           &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    // hlabel 建的是 "--" 占位标签,文案必须另设,否则屏上留下 "--"。
+    lv_obj_t *l = hlabel(c, HK_CALLS_L_X, HK_CALLS_L_Y, HK_CALLS_L_W, C_TXT_DIM,
+                         &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_text(l, "CALLS");
     s_h_calls = hlabel(c, HK_CALLS_V_X, HK_CALLS_V_Y, HK_CALLS_V_W, C_TXT_HI,
                        &lv_font_montserrat_32, LV_TEXT_ALIGN_RIGHT);
-    hlabel(c, HK_SESS_L_X, HK_SESS_L_Y, HK_SESS_L_W, C_TXT_DIM,
-           &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    l = hlabel(c, HK_SESS_L_X, HK_SESS_L_Y, HK_SESS_L_W, C_TXT_DIM,
+               &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_text(l, "SESSIONS");
     s_h_sess = hlabel(c, HK_SESS_V_X, HK_SESS_V_Y, HK_SESS_V_W, C_TXT_HI,
                       &lv_font_montserrat_32, LV_TEXT_ALIGN_RIGHT);
     // TOKENS(标签右对齐;数值横跨整行右对齐,容纳千分位)
-    hlabel(c, HK_TOK_L_X, HK_TOK_L_Y, HK_TOK_L_W, C_TXT_DIM,
-           &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    l = hlabel(c, HK_TOK_L_X, HK_TOK_L_Y, HK_TOK_L_W, C_TXT_DIM,
+               &lv_font_montserrat_14, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_text(l, "TOKENS");
     s_h_tok = hlabel(c, HK_TOK_V_X, HK_TOK_V_Y, HK_TOK_V_W, C_TXT_HI,
                      &lv_font_montserrat_20, LV_TEXT_ALIGN_RIGHT);
 
