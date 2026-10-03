@@ -1235,17 +1235,6 @@ static const char *RATE_URLS[RATE_LIVE_MAX] = {
     "https://open.er-api.com/v6/latest/USD",
 };
 
-// 已配置平台里是否有美元计价平台(有才值得花一次请求取汇率)
-static bool any_usd_provider(const we_cfg_t *cfg)
-{
-    for (uint8_t i = 0; i < cfg->prov_count; i++) {
-        const we_provider_t *p = NULL;
-        if (we_provider_lookup(cfg->prov[i].provider_id, &p) && p &&
-            p->currency && strcmp(p->currency, "USD") == 0) return true;
-    }
-    return false;
-}
-
 static double rate_cache_read(void)     // 无缓存返回 -1
 {
     nvs_handle_t h;
@@ -1671,34 +1660,13 @@ static void balance_worker(void *arg)
     we_diag_set_stage("FETCH");
     int n = s_cfg.prov_count;
     if (n > ROW_COUNT) n = ROW_COUNT;
-    float cur[ROW_COUNT] = { 0 };
-    bool  okr[ROW_COUNT] = { false };
-    int   n_ok = 0;
+    float  cur[ROW_COUNT] = { 0 };
+    bool   okr[ROW_COUNT] = { false };
+    double vraw[ROW_COUNT] = { 0 };     // 解析出的原币金额(折算在取完余额后统一做)
+    bool   usdrow[ROW_COUNT] = { false };
+    int    n_ok = 0;
     double total = 0;
-
-    // 美元平台存在 → 先把汇率备好(在线 → NVS 缓存 → 兜底常量)。
-    // 之后所有金额(显示/记账/热力)统一按人民币处理,下游不再区分币种。
     double usdcny = 0;
-    if (any_usd_provider(&s_cfg)) {
-        static char rbuf[RESP_MAX];
-        we_diag_set_stage("RATE");
-        double live = s_cancel ? -1 : fetch_usd_rate(rbuf, sizeof(rbuf));
-        if (live > 0) {
-            usdcny = live;
-            we_diag_set_rate((int)(live * 1000.0 + 0.5), "live");
-        } else {
-            double cached = rate_cache_read();
-            if (cached > 0) {
-                usdcny = cached;
-                we_diag_set_rate((int)(cached * 1000.0 + 0.5), "cache");
-            } else {
-                usdcny = RATE_DEFAULT;
-                we_diag_set_rate((int)(RATE_DEFAULT * 1000.0 + 0.5), "default");
-            }
-            ESP_LOGW(TAG, "汇率走 %s 路径: %f", cached > 0 ? "缓存" : "兜底", usdcny);
-        }
-        we_diag_set_stage("FETCH");
-    }
 
     if (!s_cancel) {
         bsp_lvgl_lock(1000);
@@ -1706,11 +1674,13 @@ static void balance_worker(void *arg)
         bsp_lvgl_unlock();
     }
 
-    // 逐平台取数;若整轮一个都没成功(DNS/握手抖动很常见),补跑一轮再判定失败。
+    // 逐平台取数。第二轮不只救"整轮全灭":部分成功时也补跑失败的行
+    // (循环里 okr[k] 的行直接跳过)——海外平台抖动一下很常见,给它一次机会,
+    // 成本只是多发失败平台那几发请求。
     for (int attempt = 0; attempt < FETCH_TRIES && !s_cancel; attempt++) {
         if (attempt > 0) {
             we_diag_set_stage("RETRY");
-            ESP_LOGW(TAG, "首轮全灭,%d ms 后重试一轮", FETCH_RETRY_MS);
+            ESP_LOGW(TAG, "有失败行,%d ms 后补一轮", FETCH_RETRY_MS);
             vTaskDelay(pdMS_TO_TICKS(FETCH_RETRY_MS));
         }
         for (int k = 0; k < n && !s_cancel; k++) {
@@ -1731,7 +1701,6 @@ static void balance_worker(void *arg)
 
             static char dresp[RESP_MAX];
             bool   ok = false;
-            double v  = 0;
             int    gotd = -3;
             int64_t t0 = esp_timer_get_time();
             if (kbuf[0]) {
@@ -1740,8 +1709,13 @@ static void balance_worker(void *arg)
                     char amt[24];
                     ok = we_provider_parse(prov->id, dresp, amt, sizeof(amt));
                     if (ok) {
-                        // 折成人民币:美元 × 汇率,其余原样。下游(显示/记账/热力)只见 CNY
-                        v = we_provider_to_cny(prov->currency, strtod(amt, NULL), usdcny);
+                        // 先存**原币**金额。汇率请求挪到余额全部取完之后:
+                        // 汇率源(frankfurter/er-api)不是关键路径,绝不能排在
+                        // 余额请求前面拖累海外平台(v1.1.6 上 OpenRouter 变
+                        // TOUT 就是这个顺序造成的)。
+                        vraw[k] = strtod(amt, NULL);
+                        usdrow[k] = (prov->currency &&
+                                     strcmp(prov->currency, "USD") == 0);
                     }
                 }
                 // 打开成功才用状态码/解析结果定码;打开失败时上面已填好 DNS/TLS/CONN
@@ -1753,14 +1727,13 @@ static void balance_worker(void *arg)
             dr.millis = (int)((esp_timer_get_time() - t0) / 1000);
             we_diag_set_row(k, &dr);
 
-            cur[k] = (float)v;
             okr[k] = ok;
-            if (ok) { total += v; n_ok++; }
+            if (ok) n_ok++;
             if (!s_cancel) {
                 bsp_lvgl_lock(1000);
                 if (ok) {
                     char dsp[24];
-                    snprintf(dsp, sizeof(dsp), "%.2f", v);
+                    snprintf(dsp, sizeof(dsp), "%.2f", vraw[k]);   // 先按原币显示,USD 行稍后折算刷新
                     dot_set(k, C_DOT_GREEN);
                     amount_set(k, dsp);
                 } else {
@@ -1773,7 +1746,7 @@ static void balance_worker(void *arg)
             ESP_LOGI(TAG, "direct %s got=%d ok=%d tag=%s %dms",
                      prov->id, gotd, ok, dr.tag, dr.millis);
         }
-        if (n_ok > 0) break;                        // 有平台成功就不再来一轮
+        if (n_ok == n) break;                       // 全部成功才提前收工;有失败行走第二轮
     }
 
     // 整轮全灭 → 立刻做一次独立探测,把"哪一层断了"钉死。
@@ -1806,6 +1779,47 @@ static void balance_worker(void *arg)
         ESP_LOGW(TAG, "网络自检 host=%s ip=%s gw=%s dns=%s/%s rc=0x%X errno=%d %dms",
                  np.host, np.ip, np.gw, np.dns1, np.dns2,
                  (unsigned)np.rc, np.sock_errno, np.ms);
+    }
+
+    // 余额已全部取回 → 现在才轮到汇率(在线 → NVS 缓存 → 兜底常量)。
+    // 顺序很关键:v1.1.6 把汇率请求放在余额之前,两发最多各 12s 的非关键请求
+    // 垫在前面,叠加堆压力,把本来就临界慢的 openrouter.ai 挤成了 TOUT。
+    // 有美元行且至少一家成功才取(整轮全灭时取汇率没有意义)。
+    bool any_usd_ok = false;
+    for (int i = 0; i < n; i++) if (usdrow[i]) any_usd_ok = true;
+    if (!s_cancel && n_ok > 0 && any_usd_ok) {
+        static char rbuf[RESP_MAX];
+        we_diag_set_stage("RATE");
+        double live = fetch_usd_rate(rbuf, sizeof(rbuf));
+        double cached = rate_cache_read();
+        if (live > 0) {
+            usdcny = live;
+            we_diag_set_rate((int)(live * 1000.0 + 0.5), "live");
+        } else if (cached > 0) {
+            usdcny = cached;
+            we_diag_set_rate((int)(cached * 1000.0 + 0.5), "cache");
+            ESP_LOGW(TAG, "汇率走缓存: %f", usdcny);
+        } else {
+            usdcny = RATE_DEFAULT;
+            we_diag_set_rate((int)(RATE_DEFAULT * 1000.0 + 0.5), "default");
+            ESP_LOGW(TAG, "汇率走兜底: %f", usdcny);
+        }
+        we_diag_set_stage("FETCH");
+    }
+
+    // 统一折算成人民币:美元行乘汇率,其余原样。之后 cur/total/记账/热力只见 CNY。
+    for (int i = 0; i < n; i++) {
+        if (!okr[i]) continue;
+        double cny = we_provider_to_cny(usdrow[i] ? "USD" : "CNY", vraw[i], usdcny);
+        cur[i] = (float)cny;
+        total += cny;
+        if (usdrow[i] && usdcny > 0 && !s_cancel) {
+            bsp_lvgl_lock(1000);
+            char dsp[24];
+            snprintf(dsp, sizeof(dsp), "%.2f", cny);    // 美元行金额刷新为人民币
+            amount_set(i, dsp);
+            bsp_lvgl_unlock();
+        }
     }
 
     if (!s_cancel) {
